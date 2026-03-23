@@ -1,0 +1,157 @@
+import express from "express";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const app = express();
+app.use(express.json());
+app.use(express.static(join(__dirname, "dist")));
+
+// ── Reddit OAuth token cache ──────────────────────────────────
+let cachedToken = null;
+let tokenExpiry = 0;
+
+async function getRedditToken() {
+  if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
+  const clientId = process.env.REDDIT_CLIENT_ID;
+  const clientSecret = process.env.REDDIT_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return null;
+
+  const res = await fetch("https://www.reddit.com/api/v1/access_token", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": "SocialScanner/1.0",
+    },
+    body: "grant_type=client_credentials",
+  });
+  const data = await res.json();
+  cachedToken = data.access_token;
+  tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+  return cachedToken;
+}
+
+// ── Fetch posts from a subreddit ──────────────────────────────
+async function fetchSubredditPosts(subName, token) {
+  const name = subName.replace(/^r\//, "");
+  const headers = { "User-Agent": "SocialScanner/1.0" };
+  const url = token
+    ? `https://oauth.reddit.com/r/${name}/new.json?limit=50`
+    : `https://www.reddit.com/r/${name}/new.json?limit=50`;
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(url, { headers });
+  const data = await res.json();
+  return data?.data?.children?.map((c) => c.data) || [];
+}
+
+// ── Fetch top comment for a post ──────────────────────────────
+async function fetchTopComment(postId, token) {
+  const headers = { "User-Agent": "SocialScanner/1.0" };
+  const url = token
+    ? `https://oauth.reddit.com/comments/${postId}.json?limit=3&depth=1`
+    : `https://www.reddit.com/comments/${postId}.json?limit=3&depth=1`;
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  try {
+    const res = await fetch(url, { headers });
+    const data = await res.json();
+    const comments = data?.[1]?.data?.children || [];
+    const top = comments.find((c) => c.kind === "t1")?.data;
+    if (!top || top.score < 1) return null;
+    return {
+      text: top.body?.slice(0, 250) || "",
+      upvotes: top.score || 0,
+      author: `u/${top.author}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function timeAgo(utc) {
+  const diff = Date.now() / 1000 - utc;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
+// ── POST /api/reddit ──────────────────────────────────────────
+app.post("/api/reddit", async (req, res) => {
+  try {
+    const { subreddits = [], keywords = [], intentPatterns = [] } = req.body;
+    if (!subreddits.length) return res.json({ threads: [] });
+
+    const token = await getRedditToken();
+    const threads = [];
+
+    for (const sub of subreddits) {
+      const subName = sub.name || sub;
+      let posts;
+      try {
+        posts = await fetchSubredditPosts(subName, token);
+      } catch (err) {
+        console.warn(`Failed to fetch ${subName}:`, err.message);
+        continue;
+      }
+
+      for (const post of posts) {
+        const text = `${post.title} ${post.selftext || ""}`.toLowerCase();
+
+        // Must match at least one intent pattern
+        const matchedPattern = intentPatterns.find((p) =>
+          text.includes(p.toLowerCase())
+        );
+        if (!matchedPattern) continue;
+
+        // Must mention at least one keyword (if keywords provided)
+        if (keywords.length > 0) {
+          const hasKeyword = keywords.some((k) =>
+            text.includes(k.toLowerCase())
+          );
+          if (!hasKeyword) continue;
+        }
+
+        const replyTo = await fetchTopComment(post.id, token);
+
+        threads.push({
+          id: post.id,
+          title: post.title,
+          sub: subName,
+          subMembers: sub.members || "?",
+          score: post.score,
+          comments: post.num_comments,
+          time: timeAgo(post.created_utc),
+          intent: post.score > 500 ? "High" : "Medium",
+          matchedPattern,
+          author: `u/${post.author}`,
+          authorKarma: "?",
+          body: post.selftext?.trim() || post.title,
+          replyTo,
+          reply: null,
+          status: "new",
+          performance: null,
+          url: `https://reddit.com${post.permalink}`,
+        });
+      }
+    }
+
+    res.json({ threads });
+  } catch (err) {
+    console.error("Reddit API error:", err);
+    res.status(500).json({ error: "Failed to fetch Reddit threads" });
+  }
+});
+
+// ── SPA fallback ──────────────────────────────────────────────
+app.get("*", (req, res) => {
+  res.sendFile(join(__dirname, "dist", "index.html"));
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () =>
+  console.log(`SocialScanner running on port ${PORT}`)
+);

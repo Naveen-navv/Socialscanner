@@ -213,8 +213,38 @@ function Dashboard({ user, onLogout }: { user: any; onLogout: () => void }) {
   const [aiLoading, setAiLoading] = useState(false);
   const [replyTarget, setReplyTarget] = useState("comment");
   const [settingsTab, setSettingsTab] = useState("intelligence"); const [selIntel, setSelIntel] = useState<string | null>(null); const [newIntelSub, setNewIntelSub] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => { (async () => { const d = await st.get(dk); if (d) { setFa(d.fa || DEF_FA); setThreads(d.threads || DEF_THREADS); setEc(d.ec || { tone: "helpful", length: "medium", bv: "" }); setMetrics(d.metrics || DEF_METRICS); setBm(d.bm || []); setIntel(d.intel || DEF_INTEL); } else { setFa(DEF_FA); setThreads(DEF_THREADS); setMetrics(DEF_METRICS); setIntel(DEF_INTEL); } setDataLoaded(true); })(); }, []);
+  const fetchFromReddit = async (currentFa: any[]) => {
+    if (!currentFa.length) return;
+    setRefreshing(true);
+    try {
+      const allSubs = currentFa.flatMap(f => f.subreddits);
+      const allKeywords = [...new Set(currentFa.flatMap(f => [...f.brandKeywords, ...f.competitors]))];
+      const allPatterns = [...new Set(currentFa.flatMap(f => f.intentPatterns))];
+      const res = await fetch("/api/reddit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subreddits: allSubs, keywords: allKeywords, intentPatterns: allPatterns }),
+      });
+      if (!res.ok) throw new Error("API error");
+      const data = await res.json();
+      if (data.threads?.length) {
+        setThreads(prev => {
+          const worked = prev.filter(t => t.status === "posted" || t.reply);
+          const workedIds = new Set(worked.map(t => t.id));
+          const fresh = data.threads.filter((t: any) => !workedIds.has(t.id));
+          return [...worked, ...fresh];
+        });
+      }
+    } catch (err) {
+      console.warn("Reddit fetch failed, using stored threads:", err);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => { (async () => { const d = await st.get(dk); let loadedFa = DEF_FA; if (d) { loadedFa = d.fa || DEF_FA; setFa(loadedFa); setThreads(d.threads || DEF_THREADS); setEc(d.ec || { tone: "helpful", length: "medium", bv: "" }); setMetrics(d.metrics || DEF_METRICS); setBm(d.bm || []); setIntel(d.intel || DEF_INTEL); } else { setFa(DEF_FA); setThreads(DEF_THREADS); setMetrics(DEF_METRICS); setIntel(DEF_INTEL); } setDataLoaded(true); fetchFromReddit(loadedFa); })(); }, []);
   useEffect(() => {
     if (!dataLoaded) return;
     if (timer.current) clearTimeout(timer.current);
@@ -274,7 +304,7 @@ function Dashboard({ user, onLogout }: { user: any; onLogout: () => void }) {
     if (activeThread) return renderWorkspace();
     const fl = threadFilter === "all" ? threads : threads.filter(t => t.status === threadFilter);
     return (<div>
-      <div style={{ marginBottom: 20 }}><h2 style={{ margin: 0, fontSize: 22, color: C.text, fontWeight: 700 }}>Leads</h2><p style={{ margin: "4px 0 0", fontSize: 13, color: C.muted }}>High-intent threads from Monitor</p></div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, flexWrap: "wrap", gap: 12 }}><div><h2 style={{ margin: 0, fontSize: 22, color: C.text, fontWeight: 700 }}>Leads</h2><p style={{ margin: "4px 0 0", fontSize: 13, color: C.muted }}>High-intent threads from Monitor</p></div><button onClick={() => fetchFromReddit(fa)} disabled={refreshing} style={{ background: refreshing ? C.border : C.accentBg, color: C.accent, border: `1px solid ${C.accent}40`, borderRadius: 8, padding: "9px 18px", cursor: refreshing ? "not-allowed" : "pointer", fontWeight: 600, fontSize: 13, opacity: refreshing ? 0.7 : 1 }}>{refreshing ? "⏳ Fetching..." : "↻ Refresh"}</button></div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
         <div style={{ display: "flex", gap: 6 }}>{["all", "new", "posted"].map(f => <button key={f} onClick={() => setThreadFilter(f)} style={{ background: threadFilter === f ? C.accentBg : "transparent", color: threadFilter === f ? C.accent : C.muted, border: `1px solid ${threadFilter === f ? C.accent : C.border}`, borderRadius: 8, padding: "7px 16px", cursor: "pointer", fontSize: 13, fontWeight: 500, textTransform: "capitalize" }}>{f} ({threads.filter(t => f === "all" || t.status === f).length})</button>)}</div>
       </div>

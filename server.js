@@ -120,8 +120,22 @@ app.post("/api/reddit", async (req, res) => {
         );
         if (!matchedPattern) continue;
 
-        // Keyword match is a bonus signal, not a hard filter
-        // (many high-intent posts won't name a specific brand)
+        // Must be about a finance tool/app — not just any finance topic
+        const toolTerms = [
+          "app", "tool", "software", "tracker", "tracking", "budgeting app",
+          "expense tracker", "finance app", "money app", "categorize", "categorization",
+          "sync", "bank sync", "transaction", "plaid", "open banking",
+          // common finance apps people compare
+          "ynab", "mint", "copilot", "monarch", "simplifi", "pocketguard",
+          "goodbudget", "walnut", "monefy", "spendee", "toshl", "cleo",
+          "empower", "personal capital", "quicken", "tiller",
+          // feature language
+          "net worth", "cash flow", "spending report", "auto categoriz",
+          "budget nudge", "overdraft", "upi", "bank statement",
+        ];
+        const isAboutTool = keywords.some((k: string) => text.includes(k.toLowerCase())) ||
+          toolTerms.some((t) => text.includes(t));
+        if (!isAboutTool) continue;
 
         const replyTo = await fetchTopComment(post.id, token);
 

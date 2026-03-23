@@ -149,6 +149,33 @@ app.post("/api/reddit", async (req, res) => {
 // ── Health check ──────────────────────────────────────────────
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
+// ── Credential test endpoint ───────────────────────────────────
+app.get("/api/test", async (req, res) => {
+  const clientId = process.env.REDDIT_CLIENT_ID;
+  const clientSecret = process.env.REDDIT_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    return res.json({ ok: false, error: "Missing REDDIT_CLIENT_ID or REDDIT_CLIENT_SECRET env vars" });
+  }
+  try {
+    const r = await fetch("https://www.reddit.com/api/v1/access_token", {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "SocialScanner/1.0",
+      },
+      body: "grant_type=client_credentials",
+    });
+    const data = await r.json();
+    if (data.access_token) {
+      return res.json({ ok: true, message: "Reddit credentials valid ✅", tokenPreview: data.access_token.slice(0, 10) + "..." });
+    }
+    return res.json({ ok: false, error: "Reddit rejected credentials", detail: data });
+  } catch (e) {
+    return res.json({ ok: false, error: e.message });
+  }
+});
+
 // ── SPA fallback ──────────────────────────────────────────────
 import { existsSync } from "fs";
 app.get("*", (req, res) => {

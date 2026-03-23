@@ -42,14 +42,7 @@ const SUBS_DB = [
   { name: "r/indiehackers", m: "45K" }, { name: "r/Entrepreneur", m: "2.1M" }, { name: "r/microsaas", m: "32K" }, { name: "r/nocode", m: "89K" },
 ];
 const DEF_FA = [{ id: "fa_1", name: "Kedil - Budgeting", icon: "💰", brandKeywords: ["Kedil", "kedil.money"], competitors: ["YNAB", "Mint", "Goodbudget", "Walnut"], subreddits: [{ name: "r/PersonalFinance", members: "19.5M" }, { name: "r/Budgeting", members: "320K" }, { name: "r/IndiaInvestments", members: "450K" }], intentPatterns: ["best", "vs", "alternative", "switching from", "review", "recommend", "looking for"] }];
-const DEF_THREADS = [
-  { id: "t1", title: "Best budgeting app for someone in India?", sub: "r/PersonalFinance", subMembers: "19.5M", score: 892, comments: 345, time: "1h ago", intent: "High", matchedPattern: "best", author: "u/mumbaidev", authorKarma: "12.4K", body: "I've been using Mint but it never synced properly with my Indian bank accounts. Looking for something that actually works with UPI and Indian banks.", replyTo: { text: "Honestly the best part about switching was that my UPI transactions finally showed up correctly. Everything just syncs.", upvotes: 47, author: "u/financegeek" }, reply: null, status: "new", performance: null },
-  { id: "t2", title: "Frustrated with Mint shutting down — what should I switch to?", sub: "r/Budgeting", subMembers: "320K", score: 567, comments: 201, time: "2h ago", intent: "High", matchedPattern: "switching from", author: "u/mintrefugee", authorKarma: "8.2K", body: "I've been using Mint for 8 years and now that it's gone, I need something that syncs with my bank and categorizes expenses automatically.", replyTo: { text: "I tried YNAB after Mint died and couldn't handle the zero-based budgeting approach. Too much work.", upvotes: 89, author: "u/budgetfrustrated" }, reply: "I was in the same boat — 6 years on Mint. Switched to Kedil about 3 months ago and it's been solid. Auto-categorizes everything including UPI transactions.\n\nThe budget nudges warn you before you overspend instead of just showing red numbers after.\n\nDisclaimer: not affiliated, just a user who found something that works.", status: "posted", performance: { upvotes: 23, replies: 4, views: 2100 } },
-  { id: "t3", title: "YNAB vs alternatives — what actually sticks?", sub: "r/PersonalFinance", subMembers: "19.5M", score: 1234, comments: 456, time: "3h ago", intent: "High", matchedPattern: "vs", author: "u/budgetseeker", authorKarma: "5.7K", body: "I keep seeing YNAB recommended everywhere but at $15/month it feels steep. What are you all using? I need auto-categorization and a clean mobile app.", replyTo: null, reply: null, status: "new", performance: null },
-  { id: "t4", title: "Any tool that gives a financial health score?", sub: "r/FinancialPlanning", subMembers: "180K", score: 345, comments: 123, time: "5h ago", intent: "High", matchedPattern: "looking for", author: "u/scoreme", authorKarma: "3.1K", body: "I want something that looks at my spending patterns and tells me how I'm doing overall. Not just tracking, but scoring my financial health.", replyTo: null, reply: null, status: "new", performance: null },
-  { id: "t5", title: "Walnut app alternative for expense tracking in India?", sub: "r/IndiaInvestments", subMembers: "450K", score: 456, comments: 156, time: "6h ago", intent: "High", matchedPattern: "alternative", author: "u/delhifinance", authorKarma: "6.3K", body: "Walnut has been getting worse with every update. Looking for something that reads SMS, categorizes UPI payments, and gives me a monthly breakdown.", replyTo: null, reply: null, status: "new", performance: null },
-  { id: "t6", title: "How do you actually stick to a budget?", sub: "r/Budgeting", subMembers: "320K", score: 678, comments: 234, time: "8h ago", intent: "Medium", matchedPattern: "recommend", author: "u/budgetfail", authorKarma: "1.8K", body: "I've tried YNAB, Goodbudget, and spreadsheets. Nothing sticks past 2 weeks. Is it a willpower problem or wrong tools?", replyTo: null, reply: null, status: "new", performance: null },
-];
+const DEF_THREADS: any[] = [];
 const DEF_METRICS = [
   { id: "traffic", name: "Website Traffic", value: "2,847", change: "+23%", trend: "up", icon: "🌐", data: [120,135,142,155,168,180,195,210,225,240,260,285] },
   { id: "google", name: "Google Rankings", value: "14 kw", change: "+3", trend: "up", icon: "🔍", data: [5,6,7,7,8,9,9,10,11,12,13,14] },
@@ -214,10 +207,12 @@ function Dashboard({ user, onLogout }: { user: any; onLogout: () => void }) {
   const [replyTarget, setReplyTarget] = useState("comment");
   const [settingsTab, setSettingsTab] = useState("intelligence"); const [selIntel, setSelIntel] = useState<string | null>(null); const [newIntelSub, setNewIntelSub] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
 
   const fetchFromReddit = async (currentFa: any[]) => {
     if (!currentFa.length) return;
     setRefreshing(true);
+    setScanError(null);
     try {
       const allSubs = currentFa.flatMap(f => f.subreddits);
       const allKeywords = [...new Set(currentFa.flatMap(f => [...f.brandKeywords, ...f.competitors]))];
@@ -227,18 +222,21 @@ function Dashboard({ user, onLogout }: { user: any; onLogout: () => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ subreddits: allSubs, keywords: allKeywords, intentPatterns: allPatterns }),
       });
-      if (!res.ok) throw new Error("API error");
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
       if (data.threads?.length) {
+        setScanError(null);
         setThreads(prev => {
           const worked = prev.filter(t => t.status === "posted" || t.reply);
           const workedIds = new Set(worked.map(t => t.id));
           const fresh = data.threads.filter((t: any) => !workedIds.has(t.id));
           return [...worked, ...fresh];
         });
+      } else {
+        setScanError("Reddit returned 0 matching threads — try broadening your intent patterns or subreddits in Monitor.");
       }
-    } catch (err) {
-      console.warn("Reddit fetch failed, using stored threads:", err);
+    } catch (err: any) {
+      setScanError(`Fetch failed: ${err.message} — check Railway logs & /api/test`);
     } finally {
       setRefreshing(false);
     }
@@ -305,9 +303,11 @@ function Dashboard({ user, onLogout }: { user: any; onLogout: () => void }) {
     const fl = threadFilter === "all" ? threads : threads.filter(t => t.status === threadFilter);
     return (<div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, flexWrap: "wrap", gap: 12 }}><div><h2 style={{ margin: 0, fontSize: 22, color: C.text, fontWeight: 700 }}>Leads</h2><p style={{ margin: "4px 0 0", fontSize: 13, color: C.muted }}>High-intent threads from Monitor</p></div><button onClick={() => fetchFromReddit(fa)} disabled={refreshing} style={{ background: refreshing ? C.border : C.accentBg, color: C.accent, border: `1px solid ${C.accent}40`, borderRadius: 8, padding: "9px 18px", cursor: refreshing ? "not-allowed" : "pointer", fontWeight: 600, fontSize: 13, opacity: refreshing ? 0.7 : 1 }}>{refreshing ? "⏳ Fetching..." : "↻ Refresh"}</button></div>
+      {scanError && <div style={{ marginBottom: 16, padding: "12px 16px", background: `${C.danger}15`, border: `1px solid ${C.danger}40`, borderRadius: 10, fontSize: 13, color: C.danger }}>{scanError}</div>}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
         <div style={{ display: "flex", gap: 6 }}>{["all", "new", "posted"].map(f => <button key={f} onClick={() => setThreadFilter(f)} style={{ background: threadFilter === f ? C.accentBg : "transparent", color: threadFilter === f ? C.accent : C.muted, border: `1px solid ${threadFilter === f ? C.accent : C.border}`, borderRadius: 8, padding: "7px 16px", cursor: "pointer", fontSize: 13, fontWeight: 500, textTransform: "capitalize" }}>{f} ({threads.filter(t => f === "all" || t.status === f).length})</button>)}</div>
       </div>
+      {fl.length === 0 && !refreshing && <div style={{ textAlign: "center", padding: 60, color: C.muted }}>No leads yet — click ↻ Refresh to scan Reddit</div>}
       {fl.map(t => <div key={t.id} onClick={() => { setActiveThread(t); setDraftText(t.reply || genReplyFallback(t, ec.tone, ec.length)); }} style={{ background: C.card, borderRadius: 10, padding: "16px 18px", marginBottom: 8, border: `1px solid ${C.border}`, cursor: "pointer", transition: "border-color 0.15s" }} onMouseEnter={e => (e.currentTarget.style.borderColor = C.accent)} onMouseLeave={e => (e.currentTarget.style.borderColor = C.border)}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 200 }}>

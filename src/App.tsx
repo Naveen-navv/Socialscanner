@@ -220,7 +220,7 @@ function Dashboard({ user, onLogout }: { user: any; onLogout: () => void }) {
   const [scanError, setScanError] = useState<string | null>(null);
   const [toolTerms, setToolTerms] = useState<string[]>(DEF_TOOL_TERMS);
 
-  const fetchFromReddit = async (currentFa: any[]) => {
+  const fetchFromReddit = async (currentFa: any[], currentToolTerms: string[]) => {
     if (!currentFa.length) return;
     setRefreshing(true);
     setScanError(null);
@@ -231,7 +231,7 @@ function Dashboard({ user, onLogout }: { user: any; onLogout: () => void }) {
       const res = await fetch("/api/reddit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ subreddits: allSubs, keywords: allKeywords, intentPatterns: allPatterns, toolTerms }),
+        body: JSON.stringify({ subreddits: allSubs, keywords: allKeywords, intentPatterns: allPatterns, toolTerms: currentToolTerms }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
@@ -255,7 +255,7 @@ function Dashboard({ user, onLogout }: { user: any; onLogout: () => void }) {
     }
   };
 
-  useEffect(() => { (async () => { const d = await st.get(dk); let loadedFa = DEF_FA; if (d) { loadedFa = d.fa || DEF_FA; setFa(loadedFa); setThreads(d.threads || DEF_THREADS); setEc(d.ec || { tone: "helpful", length: "medium", bv: "" }); setMetrics(d.metrics || DEF_METRICS); setBm(d.bm || []); setIntel(d.intel || DEF_INTEL); setToolTerms(d.toolTerms || DEF_TOOL_TERMS); } else { setFa(DEF_FA); setThreads(DEF_THREADS); setMetrics(DEF_METRICS); setIntel(DEF_INTEL); setToolTerms(DEF_TOOL_TERMS); } setDataLoaded(true); fetchFromReddit(loadedFa); })(); }, []);
+  useEffect(() => { (async () => { const d = await st.get(dk); let loadedFa = DEF_FA; let loadedToolTerms = DEF_TOOL_TERMS; if (d) { loadedFa = d.fa || DEF_FA; loadedToolTerms = d.toolTerms || DEF_TOOL_TERMS; setFa(loadedFa); setThreads(d.threads || DEF_THREADS); setEc(d.ec || { tone: "helpful", length: "medium", bv: "" }); setMetrics(d.metrics || DEF_METRICS); setBm(d.bm || []); setIntel(d.intel || DEF_INTEL); setToolTerms(loadedToolTerms); } else { setFa(DEF_FA); setThreads(DEF_THREADS); setMetrics(DEF_METRICS); setIntel(DEF_INTEL); setToolTerms(DEF_TOOL_TERMS); } setDataLoaded(true); fetchFromReddit(loadedFa, loadedToolTerms); })(); }, []);
   useEffect(() => {
     if (!dataLoaded) return;
     if (timer.current) clearTimeout(timer.current);
@@ -319,7 +319,7 @@ function Dashboard({ user, onLogout }: { user: any; onLogout: () => void }) {
         <div><h2 style={{ margin: 0, fontSize: 22, color: C.text, fontWeight: 700 }}>Leads</h2><p style={{ margin: "4px 0 0", fontSize: 13, color: C.muted }}>High-intent threads from Monitor</p></div>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => { setThreads([]); setScanError(null); }} style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 8, padding: "9px 14px", cursor: "pointer", fontSize: 12 }}>🗑 Clear Cache</button>
-          <button onClick={() => fetchFromReddit(fa)} disabled={refreshing} style={{ background: refreshing ? C.border : C.accentBg, color: C.accent, border: `1px solid ${C.accent}40`, borderRadius: 8, padding: "9px 18px", cursor: refreshing ? "not-allowed" : "pointer", fontWeight: 600, fontSize: 13, opacity: refreshing ? 0.7 : 1 }}>{refreshing ? "⏳ Fetching..." : "↻ Refresh"}</button>
+          <button onClick={() => fetchFromReddit(fa, toolTerms)} disabled={refreshing} style={{ background: refreshing ? C.border : C.accentBg, color: C.accent, border: `1px solid ${C.accent}40`, borderRadius: 8, padding: "9px 18px", cursor: refreshing ? "not-allowed" : "pointer", fontWeight: 600, fontSize: 13, opacity: refreshing ? 0.7 : 1 }}>{refreshing ? "⏳ Fetching..." : "↻ Refresh"}</button>
         </div>
       </div>
       {scanError && <div style={{ marginBottom: 16, padding: "12px 16px", background: `${C.danger}15`, border: `1px solid ${C.danger}40`, borderRadius: 10, fontSize: 13, color: C.danger }}>{scanError}</div>}

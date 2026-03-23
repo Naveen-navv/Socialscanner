@@ -95,7 +95,7 @@ function timeAgo(utc) {
 // ── POST /api/reddit ──────────────────────────────────────────
 app.post("/api/reddit", async (req, res) => {
   try {
-    const { subreddits = [], keywords = [], intentPatterns = [] } = req.body;
+    const { subreddits = [], keywords = [], intentPatterns = [], toolTerms = [] } = req.body;
     if (!subreddits.length) return res.json({ threads: [] });
 
     const token = await getRedditToken();
@@ -120,21 +120,9 @@ app.post("/api/reddit", async (req, res) => {
         );
         if (!matchedPattern) continue;
 
-        // Must be about a finance tool/app — not just any finance topic
-        const toolTerms = [
-          "app", "tool", "software", "tracker", "tracking", "budgeting app",
-          "expense tracker", "finance app", "money app", "categorize", "categorization",
-          "sync", "bank sync", "transaction", "plaid", "open banking",
-          // common finance apps people compare
-          "ynab", "mint", "copilot", "monarch", "simplifi", "pocketguard",
-          "goodbudget", "walnut", "monefy", "spendee", "toshl", "cleo",
-          "empower", "personal capital", "quicken", "tiller",
-          // feature language
-          "net worth", "cash flow", "spending report", "auto categoriz",
-          "budget nudge", "overdraft", "upi", "bank statement",
-        ];
-        const isAboutTool = keywords.some((k: string) => text.includes(k.toLowerCase())) ||
-          toolTerms.some((t) => text.includes(t));
+        // Must be about a finance tool/app — terms come from the user's settings
+        const isAboutTool = keywords.some((k) => text.includes(k.toLowerCase())) ||
+          toolTerms.some((t) => text.includes(t.toLowerCase()));
         if (!isAboutTool) continue;
 
         const replyTo = await fetchTopComment(post.id, token);

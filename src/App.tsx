@@ -43,6 +43,16 @@ const SUBS_DB = [
 ];
 const DEF_FA = [{ id: "fa_1", name: "Kedil - Budgeting", icon: "💰", brandKeywords: ["Kedil", "kedil.money"], competitors: ["YNAB", "Mint", "Goodbudget", "Walnut"], subreddits: [{ name: "r/PersonalFinance", members: "19.5M" }, { name: "r/Budgeting", members: "320K" }, { name: "r/IndiaInvestments", members: "450K" }], intentPatterns: ["best", "vs", "alternative", "switching from", "review", "recommend", "looking for"] }];
 const DEF_THREADS: any[] = [];
+const DEF_TOOL_TERMS = [
+  "app", "tool", "software", "tracker", "tracking", "budgeting app",
+  "expense tracker", "finance app", "money app", "categorize", "categorization",
+  "sync", "bank sync", "transaction", "plaid", "open banking",
+  "ynab", "mint", "copilot", "monarch", "simplifi", "pocketguard",
+  "goodbudget", "walnut", "monefy", "spendee", "toshl", "cleo",
+  "empower", "personal capital", "quicken", "tiller",
+  "net worth", "cash flow", "spending report", "auto categoriz",
+  "budget nudge", "overdraft", "upi", "bank statement",
+];
 const DEF_METRICS = [
   { id: "traffic", name: "Website Traffic", value: "2,847", change: "+23%", trend: "up", icon: "🌐", data: [120,135,142,155,168,180,195,210,225,240,260,285] },
   { id: "google", name: "Google Rankings", value: "14 kw", change: "+3", trend: "up", icon: "🔍", data: [5,6,7,7,8,9,9,10,11,12,13,14] },
@@ -208,6 +218,7 @@ function Dashboard({ user, onLogout }: { user: any; onLogout: () => void }) {
   const [settingsTab, setSettingsTab] = useState("intelligence"); const [selIntel, setSelIntel] = useState<string | null>(null); const [newIntelSub, setNewIntelSub] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [toolTerms, setToolTerms] = useState<string[]>(DEF_TOOL_TERMS);
 
   const fetchFromReddit = async (currentFa: any[]) => {
     if (!currentFa.length) return;
@@ -220,7 +231,7 @@ function Dashboard({ user, onLogout }: { user: any; onLogout: () => void }) {
       const res = await fetch("/api/reddit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ subreddits: allSubs, keywords: allKeywords, intentPatterns: allPatterns }),
+        body: JSON.stringify({ subreddits: allSubs, keywords: allKeywords, intentPatterns: allPatterns, toolTerms }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
@@ -244,13 +255,13 @@ function Dashboard({ user, onLogout }: { user: any; onLogout: () => void }) {
     }
   };
 
-  useEffect(() => { (async () => { const d = await st.get(dk); let loadedFa = DEF_FA; if (d) { loadedFa = d.fa || DEF_FA; setFa(loadedFa); setThreads(d.threads || DEF_THREADS); setEc(d.ec || { tone: "helpful", length: "medium", bv: "" }); setMetrics(d.metrics || DEF_METRICS); setBm(d.bm || []); setIntel(d.intel || DEF_INTEL); } else { setFa(DEF_FA); setThreads(DEF_THREADS); setMetrics(DEF_METRICS); setIntel(DEF_INTEL); } setDataLoaded(true); fetchFromReddit(loadedFa); })(); }, []);
+  useEffect(() => { (async () => { const d = await st.get(dk); let loadedFa = DEF_FA; if (d) { loadedFa = d.fa || DEF_FA; setFa(loadedFa); setThreads(d.threads || DEF_THREADS); setEc(d.ec || { tone: "helpful", length: "medium", bv: "" }); setMetrics(d.metrics || DEF_METRICS); setBm(d.bm || []); setIntel(d.intel || DEF_INTEL); setToolTerms(d.toolTerms || DEF_TOOL_TERMS); } else { setFa(DEF_FA); setThreads(DEF_THREADS); setMetrics(DEF_METRICS); setIntel(DEF_INTEL); setToolTerms(DEF_TOOL_TERMS); } setDataLoaded(true); fetchFromReddit(loadedFa); })(); }, []);
   useEffect(() => {
     if (!dataLoaded) return;
     if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(async () => { setSaving(true); await st.set(dk, { fa, threads, ec, metrics, bm, intel }); setLastSaved(new Date().toLocaleTimeString()); setSaving(false); }, 800);
+    timer.current = setTimeout(async () => { setSaving(true); await st.set(dk, { fa, threads, ec, metrics, bm, intel, toolTerms }); setLastSaved(new Date().toLocaleTimeString()); setSaving(false); }, 800);
     return () => { if (timer.current) clearTimeout(timer.current); };
-  }, [fa, threads, ec, metrics, bm, intel, dataLoaded]);
+  }, [fa, threads, ec, metrics, bm, intel, toolTerms, dataLoaded]);
 
   const updateFA = (id: string, u: any) => setFa(p => p.map(f => f.id === id ? { ...f, ...u } : f));
 
@@ -452,8 +463,26 @@ function Dashboard({ user, onLogout }: { user: any; onLogout: () => void }) {
     }
     return (<div>
       <h2 style={{ margin: "0 0 16px", fontSize: 22, color: C.text, fontWeight: 700 }}>Settings</h2>
-      <div style={{ display: "flex", gap: 6, marginBottom: 20 }}>{[{ id: "intelligence", label: "🧠 Intelligence Agent" }, { id: "account", label: "👤 Account" }].map(t => <button key={t.id} onClick={() => setSettingsTab(t.id)} style={{ background: settingsTab === t.id ? C.accentBg : "transparent", color: settingsTab === t.id ? C.accent : C.muted, border: `1px solid ${settingsTab === t.id ? C.accent : C.border}`, borderRadius: 8, padding: "8px 16px", cursor: "pointer", fontSize: 13, fontWeight: 500 }}>{t.label}</button>)}</div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 20 }}>{[{ id: "intelligence", label: "🧠 Intelligence Agent" }, { id: "filters", label: "🔬 Lead Filters" }, { id: "account", label: "👤 Account" }].map(t => <button key={t.id} onClick={() => setSettingsTab(t.id)} style={{ background: settingsTab === t.id ? C.accentBg : "transparent", color: settingsTab === t.id ? C.accent : C.muted, border: `1px solid ${settingsTab === t.id ? C.accent : C.border}`, borderRadius: 8, padding: "8px 16px", cursor: "pointer", fontSize: 13, fontWeight: 500 }}>{t.label}</button>)}</div>
       {settingsTab === "account" && <div style={{ background: C.card, borderRadius: 12, padding: 20, border: `1px solid ${C.border}` }}><div style={{ marginBottom: 16 }}><div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>Name</div><div style={{ fontSize: 15, color: C.text, fontWeight: 600 }}>{user.name}</div></div><div style={{ marginBottom: 16 }}><div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>Email</div><div style={{ fontSize: 15, color: C.text }}>{user.email}</div></div><div><div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>Plan</div><Badge color={C.accent}>{user.plan || "Pro"}</Badge></div></div>}
+
+      {settingsTab === "filters" && <div>
+        <div style={{ background: `${C.orange}10`, borderRadius: 10, padding: 16, marginBottom: 20, border: `1px solid ${C.orange}25` }}>
+          <div style={{ fontSize: 12, color: C.orange, fontWeight: 700, marginBottom: 4 }}>🔬 How Lead Filters work</div>
+          <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6 }}>Posts must match an intent pattern <strong style={{ color: C.text }}>and</strong> contain at least one term below to appear as a lead. This filters out general finance posts (savings accounts, investing tips) and keeps only posts about finance tools & apps.</div>
+        </div>
+        <div style={{ background: C.card, borderRadius: 12, padding: 20, border: `1px solid ${C.border}` }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>Tool Context Terms</div>
+              <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{toolTerms.length} terms active</div>
+            </div>
+            <button onClick={() => setToolTerms(DEF_TOOL_TERMS)} style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 8, padding: "6px 14px", cursor: "pointer", fontSize: 12 }}>↺ Reset to defaults</button>
+          </div>
+          <TagInput tags={toolTerms} setTags={setToolTerms} placeholder='Add term e.g. "budget app"...' color={C.orange} />
+        </div>
+      </div>}
+
       {settingsTab === "intelligence" && <>
         <div style={{ background: `${C.purple}10`, borderRadius: 10, padding: 16, marginBottom: 16, border: `1px solid ${C.purple}25` }}>
           <div style={{ fontSize: 12, color: C.purple, fontWeight: 700, marginBottom: 8 }}>How Intelligence Agent works</div>

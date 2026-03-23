@@ -146,12 +146,21 @@ app.post("/api/reddit", async (req, res) => {
   }
 });
 
+// ── Health check ──────────────────────────────────────────────
+app.get("/health", (req, res) => res.json({ status: "ok" }));
+
 // ── SPA fallback ──────────────────────────────────────────────
+import { existsSync } from "fs";
 app.get("*", (req, res) => {
-  res.sendFile(join(__dirname, "dist", "index.html"));
+  const indexPath = join(__dirname, "dist", "index.html");
+  if (existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(200).send("Building... please refresh in a moment.");
+  }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () =>
+app.listen(PORT, "0.0.0.0", () =>
   console.log(`SocialScanner running on port ${PORT}`)
 );

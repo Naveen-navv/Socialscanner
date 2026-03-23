@@ -121,8 +121,9 @@ app.post("/api/reddit", async (req, res) => {
         if (!matchedPattern) continue;
 
         // Must be about a finance tool/app — terms come from the user's settings
-        const isAboutTool = keywords.some((k) => text.includes(k.toLowerCase())) ||
-          toolTerms.some((t) => text.includes(t.toLowerCase()));
+        const isAboutTool = toolTerms.length === 0
+          ? true
+          : toolTerms.some((t) => text.includes(t.toLowerCase()));
         if (!isAboutTool) continue;
 
         const replyTo = await fetchTopComment(post.id, token);

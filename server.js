@@ -34,18 +34,31 @@ async function getRedditToken() {
   return cachedToken;
 }
 
-// ── Fetch posts from a subreddit ──────────────────────────────
+// ── Fetch posts from a subreddit (hot + new combined) ────────
 async function fetchSubredditPosts(subName, token) {
   const name = subName.replace(/^r\//, "");
   const headers = { "User-Agent": "SocialScanner/1.0" };
-  const url = token
-    ? `https://oauth.reddit.com/r/${name}/new.json?limit=50`
-    : `https://www.reddit.com/r/${name}/new.json?limit=50`;
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  const base = token ? `https://oauth.reddit.com` : `https://www.reddit.com`;
 
-  const res = await fetch(url, { headers });
-  const data = await res.json();
-  return data?.data?.children?.map((c) => c.data) || [];
+  const [hotRes, newRes] = await Promise.allSettled([
+    fetch(`${base}/r/${name}/hot.json?limit=50`, { headers }),
+    fetch(`${base}/r/${name}/new.json?limit=50`, { headers }),
+  ]);
+
+  const posts = [];
+  const seen = new Set();
+  for (const result of [hotRes, newRes]) {
+    if (result.status !== "fulfilled") continue;
+    const data = await result.value.json();
+    for (const child of data?.data?.children || []) {
+      if (!seen.has(child.data.id)) {
+        seen.add(child.data.id);
+        posts.push(child.data);
+      }
+    }
+  }
+  return posts;
 }
 
 // ── Fetch top comment for a post ──────────────────────────────
@@ -107,13 +120,8 @@ app.post("/api/reddit", async (req, res) => {
         );
         if (!matchedPattern) continue;
 
-        // Must mention at least one keyword (if keywords provided)
-        if (keywords.length > 0) {
-          const hasKeyword = keywords.some((k) =>
-            text.includes(k.toLowerCase())
-          );
-          if (!hasKeyword) continue;
-        }
+        // Keyword match is a bonus signal, not a hard filter
+        // (many high-intent posts won't name a specific brand)
 
         const replyTo = await fetchTopComment(post.id, token);
 

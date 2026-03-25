@@ -99,24 +99,6 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     return () => { if (timer.current) clearTimeout(timer.current); };
   }, [fa, threads, ec, metrics, bm, intel, toolTerms, searchAll, dataLoaded]);
 
-  useEffect(() => {
-    if (!activeThread?.url) return;
-
-    const buttons = Array.from(document.querySelectorAll("button"));
-    const viewButton = buttons.find((button) =>
-      button.textContent?.includes("View on Reddit")
-    );
-
-    if (!viewButton) return;
-
-    const handleClick = () => {
-      window.open(activeThread.url, "_blank", "noopener,noreferrer");
-    };
-
-    viewButton.addEventListener("click", handleClick);
-    return () => viewButton.removeEventListener("click", handleClick);
-  }, [activeThread]);
-
   const updateFA = (id: string, u: any) => setFa(p => p.map(f => f.id === id ? { ...f, ...u } : f));
 
   const validate = (text: string, subName: string) => {
@@ -206,6 +188,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     const t = activeThread; const isP = t.status === "posted";
     const copyR = () => { navigator.clipboard.writeText(draftText).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }).catch(() => {}); };
     const markP = () => { const perf = { upvotes: 0, replies: 0, views: 0 }; setThreads(p => p.map(x => x.id === t.id ? { ...x, reply: draftText, status: "posted", performance: perf } : x)); setActiveThread({ ...t, reply: draftText, status: "posted", performance: perf }); };
+    const openReddit = () => { if (t.url) window.open(t.url, "_blank", "noopener,noreferrer"); };
     const regen = async (tone?: string, len?: string) => {
       const useTone = tone || ec.tone; const useLen = len || ec.length;
       setAiLoading(true);
@@ -221,7 +204,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
           <button onClick={() => setActiveThread(null)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 14, flexShrink: 0 }}>←</button>
           <div style={{ minWidth: 0 }}><div style={{ fontSize: 15, fontWeight: 700, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div><div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}><Badge color={C.blue}>{t.sub}</Badge><span style={{ fontSize: 11, color: C.muted }}>{t.author} • ▲ {t.score} • 💬 {t.comments} • {t.time}</span></div></div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>{isP ? <Badge color={C.green}>✓ Posted</Badge> : <Badge color={C.warn}>Draft</Badge>}<button style={{ background: "transparent", color: C.accent, border: `1px solid ${C.accent}`, borderRadius: 8, padding: "6px 14px", cursor: "pointer", fontSize: 12 }}>↗ View on Reddit</button></div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>{isP ? <Badge color={C.green}>✓ Posted</Badge> : <Badge color={C.warn}>Draft</Badge>}<button onClick={openReddit} disabled={!t.url} style={{ background: "transparent", color: t.url ? C.accent : C.muted, border: `1px solid ${t.url ? C.accent : C.border}`, borderRadius: 8, padding: "6px 14px", cursor: t.url ? "pointer" : "not-allowed", fontSize: 12, opacity: t.url ? 1 : 0.6 }}>↗ View on Reddit</button></div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "5fr 7fr", gap: 16 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>

@@ -111,7 +111,7 @@ async function getRedditToken() {
       headers: {
         Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
         "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "web:SocialScanner:v1.0 (by /u/kedil_app)",
+        "User-Agent": "SocialScanner/1.0",
       },
       body: "grant_type=client_credentials",
     });
@@ -133,7 +133,7 @@ async function getRedditToken() {
 // ── Fetch posts from a subreddit (hot + new) ─────────────────
 async function fetchSubredditPosts(subName, token) {
   const name = subName.replace(/^r\//, "");
-  const headers = { "User-Agent": "web:SocialScanner:v1.0 (by /u/kedil_app)" };
+  const headers = { "User-Agent": "SocialScanner/1.0" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const base = token ? "https://oauth.reddit.com" : "https://www.reddit.com";
   const [hotRes, newRes] = await Promise.allSettled([
@@ -157,7 +157,7 @@ async function fetchSubredditPosts(subName, token) {
 
 // ── Search all of Reddit ─────────────────────────────────────
 async function searchReddit(query, token) {
-  const headers = { "User-Agent": "web:SocialScanner:v1.0 (by /u/kedil_app)" };
+  const headers = { "User-Agent": "SocialScanner/1.0" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const base = token ? "https://oauth.reddit.com" : "https://www.reddit.com";
   const url = `${base}/search.json?q=${encodeURIComponent(query)}&sort=relevance&limit=100&type=link&t=week`;
@@ -170,7 +170,7 @@ async function searchReddit(query, token) {
 
 // ── Fetch top comment ────────────────────────────────────────
 async function fetchTopComment(postId, token) {
-  const headers = { "User-Agent": "web:SocialScanner:v1.0 (by /u/kedil_app)" };
+  const headers = { "User-Agent": "SocialScanner/1.0" };
   const url = token
     ? `https://oauth.reddit.com/comments/${postId}.json?limit=3&depth=1`
     : `https://www.reddit.com/comments/${postId}.json?limit=3&depth=1`;
@@ -199,19 +199,11 @@ app.post("/api/reddit", async (req, res) => {
     if (!searchAll && !subreddits.length) return res.json({ threads: [] });
 
     let token = await getRedditToken();
-    // Retry once if token fetch failed (cold start / transient failure)
     if (!token) token = await getRedditToken();
     const threads = [];
     let allPosts = [];
     const fetchErrors = [];
-
-    if (!token) {
-      const hasEnv = !!(process.env.REDDIT_CLIENT_ID && process.env.REDDIT_CLIENT_SECRET);
-      return res.json({ threads: [], debug: hasEnv
-        ? "Reddit token fetch failed (Reddit may be rate-limiting or down) — try again in a minute"
-        : "Missing REDDIT_CLIENT_ID or REDDIT_CLIENT_SECRET env vars"
-      });
-    }
+    if (!token) fetchErrors.push("Reddit OAuth token unavailable, falling back to public endpoints");
 
     if (searchAll) {
       const queryTerms = intentPatterns.slice(0, 4).map((p) => `"${p}"`);
@@ -294,7 +286,7 @@ app.get("/api/test", async (req, res) => {
       headers: {
         Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
         "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "web:SocialScanner:v1.0 (by /u/kedil_app)",
+        "User-Agent": "SocialScanner/1.0",
       },
       body: "grant_type=client_credentials",
     });

@@ -105,19 +105,28 @@ async function getRedditToken() {
   const clientId = process.env.REDDIT_CLIENT_ID;
   const clientSecret = process.env.REDDIT_CLIENT_SECRET;
   if (!clientId || !clientSecret) return null;
-  const res = await fetch("https://www.reddit.com/api/v1/access_token", {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": "SocialScanner/1.0",
-    },
-    body: "grant_type=client_credentials",
-  });
-  const data = await res.json();
-  cachedToken = data.access_token;
-  tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
-  return cachedToken;
+  try {
+    const res = await fetch("https://www.reddit.com/api/v1/access_token", {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "SocialScanner/1.0",
+      },
+      body: "grant_type=client_credentials",
+    });
+    const data = await res.json();
+    if (!data.access_token) {
+      console.warn("Reddit token refresh failed:", data);
+      return cachedToken; // return stale token rather than undefined
+    }
+    cachedToken = data.access_token;
+    tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+    return cachedToken;
+  } catch (err) {
+    console.warn("Reddit token fetch error:", err.message);
+    return cachedToken; // return stale token rather than crashing
+  }
 }
 
 // ── Fetch posts from a subreddit (hot + new) ─────────────────
@@ -191,33 +200,46 @@ app.post("/api/reddit", async (req, res) => {
     const token = await getRedditToken();
     const threads = [];
     let allPosts = [];
+    const fetchErrors = [];
+
+    if (!token) {
+      return res.json({ threads: [], debug: "No Reddit token — check REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET" });
+    }
 
     if (searchAll) {
-      // Build a search query from intent patterns + tool terms
       const queryTerms = intentPatterns.slice(0, 4).map((p) => `"${p}"`);
       const toolQuery = toolTerms.slice(0, 6).join(" OR ");
       const query = `(${queryTerms.join(" OR ")}) ${toolQuery ? `(${toolQuery})` : ""}`.trim();
       allPosts = await searchReddit(query, token);
+      if (!allPosts.length) fetchErrors.push("Reddit search returned 0 results");
     } else {
       for (const sub of subreddits) {
         const subName = sub.name || sub;
         try {
           const posts = await fetchSubredditPosts(subName, token);
+          if (posts.length === 0) fetchErrors.push(`${subName}: 0 posts (possibly rate-limited)`);
           allPosts.push(...posts.map((p) => ({ ...p, _sub: sub })));
         } catch (err) {
+          fetchErrors.push(`${subName}: ${err.message}`);
           console.warn(`Failed to fetch ${subName}:`, err.message);
         }
       }
     }
 
+    let intentMatched = 0;
+    let toolMatched = 0;
+
     for (const post of allPosts) {
       const text = `${post.title} ${post.selftext || ""}`.toLowerCase();
       const matchedPattern = intentPatterns.find((p) => text.includes(p.toLowerCase()));
       if (!matchedPattern) continue;
+      intentMatched++;
       const isAboutTool = toolTerms.length === 0 ? true : toolTerms.some((t) => text.includes(t.toLowerCase()));
       if (!isAboutTool) continue;
+      toolMatched++;
 
-      const replyTo = await fetchTopComment(post.id, token);
+      // Only fetch top comment for first 15 matches to avoid rate limiting
+      const replyTo = threads.length < 15 ? await fetchTopComment(post.id, token) : null;
       const subName = searchAll ? `r/${post.subreddit}` : (post._sub?.name || post._sub || `r/${post.subreddit}`);
       const subMembers = searchAll ? "?" : (post._sub?.members || "?");
 
@@ -242,7 +264,9 @@ app.post("/api/reddit", async (req, res) => {
       });
     }
 
-    res.json({ threads });
+    const debug = `Fetched ${allPosts.length} posts → ${intentMatched} matched intent → ${toolMatched} matched tool terms → ${threads.length} threads returned` + (fetchErrors.length ? ` | Errors: ${fetchErrors.join("; ")}` : "");
+    console.log(debug);
+    res.json({ threads, debug });
   } catch (err) {
     console.error("Reddit API error:", err);
     res.status(500).json({ error: "Failed to fetch Reddit threads" });

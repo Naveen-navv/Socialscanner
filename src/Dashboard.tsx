@@ -82,7 +82,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       if (data.threads?.length) {
         setScanError(null);
       } else {
-        setScanError("Reddit returned 0 matching threads — try broadening your intent patterns or subreddits in Monitor.");
+        setScanError(data.debug || "Reddit returned 0 matching threads — try broadening your intent patterns or subreddits in Monitor.");
       }
     } catch (err: any) {
       setScanError(`Fetch failed: ${err.message} — check Railway logs & /api/test`);

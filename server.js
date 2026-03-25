@@ -118,14 +118,15 @@ async function getRedditToken() {
     const data = await res.json();
     if (!data.access_token) {
       console.warn("Reddit token refresh failed:", data);
-      return cachedToken; // return stale token rather than undefined
+      cachedToken = null; tokenExpiry = 0; // clear so retry actually retries
+      return null;
     }
     cachedToken = data.access_token;
     tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
     return cachedToken;
   } catch (err) {
     console.warn("Reddit token fetch error:", err.message);
-    return cachedToken; // return stale token rather than crashing
+    return null;
   }
 }
 
@@ -197,13 +198,19 @@ app.post("/api/reddit", async (req, res) => {
     const { subreddits = [], keywords = [], intentPatterns = [], toolTerms = [], searchAll = false } = req.body;
     if (!searchAll && !subreddits.length) return res.json({ threads: [] });
 
-    const token = await getRedditToken();
+    let token = await getRedditToken();
+    // Retry once if token fetch failed (cold start / transient failure)
+    if (!token) token = await getRedditToken();
     const threads = [];
     let allPosts = [];
     const fetchErrors = [];
 
     if (!token) {
-      return res.json({ threads: [], debug: "No Reddit token — check REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET" });
+      const hasEnv = !!(process.env.REDDIT_CLIENT_ID && process.env.REDDIT_CLIENT_SECRET);
+      return res.json({ threads: [], debug: hasEnv
+        ? "Reddit token fetch failed (Reddit may be rate-limiting or down) — try again in a minute"
+        : "Missing REDDIT_CLIENT_ID or REDDIT_CLIENT_SECRET env vars"
+      });
     }
 
     if (searchAll) {

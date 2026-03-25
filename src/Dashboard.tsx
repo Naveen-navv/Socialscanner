@@ -99,6 +99,24 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     return () => { if (timer.current) clearTimeout(timer.current); };
   }, [fa, threads, ec, metrics, bm, intel, toolTerms, searchAll, dataLoaded]);
 
+  useEffect(() => {
+    if (!activeThread?.url) return;
+
+    const buttons = Array.from(document.querySelectorAll("button"));
+    const viewButton = buttons.find((button) =>
+      button.textContent?.includes("View on Reddit")
+    );
+
+    if (!viewButton) return;
+
+    const handleClick = () => {
+      window.open(activeThread.url, "_blank", "noopener,noreferrer");
+    };
+
+    viewButton.addEventListener("click", handleClick);
+    return () => viewButton.removeEventListener("click", handleClick);
+  }, [activeThread]);
+
   const updateFA = (id: string, u: any) => setFa(p => p.map(f => f.id === id ? { ...f, ...u } : f));
 
   const validate = (text: string, subName: string) => {

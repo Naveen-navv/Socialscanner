@@ -99,6 +99,10 @@ app.put("/api/data", async (req, res) => {
 // ── Reddit OAuth token cache ─────────────────────────────────
 let cachedToken = null;
 let tokenExpiry = 0;
+const REDDIT_RESULT_TTL_MS = 5 * 60 * 1000;
+const SUBREDDIT_EMPTY_TTL_MS = 3 * 60 * 1000;
+const redditResultCache = new Map();
+const subredditCooldowns = new Map();
 
 async function getRedditToken() {
   if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
@@ -155,6 +159,55 @@ async function fetchSubredditPosts(subName, token) {
   return posts;
 }
 
+function getRedditCacheKey({ subreddits = [], intentPatterns = [], toolTerms = [], searchAll = false }) {
+  const normalizedSubs = subreddits
+    .map((sub) => (typeof sub === "string" ? sub : sub.name || ""))
+    .filter(Boolean)
+    .sort();
+  const normalizedPatterns = [...intentPatterns].filter(Boolean).sort();
+  const normalizedToolTerms = [...toolTerms].filter(Boolean).sort();
+  return JSON.stringify({
+    searchAll,
+    subreddits: normalizedSubs,
+    intentPatterns: normalizedPatterns,
+    toolTerms: normalizedToolTerms,
+  });
+}
+
+function getCachedRedditResult(cacheKey) {
+  const entry = redditResultCache.get(cacheKey);
+  if (!entry) return null;
+  if (Date.now() >= entry.expiresAt) {
+    redditResultCache.delete(cacheKey);
+    return null;
+  }
+  return entry.value;
+}
+
+function setCachedRedditResult(cacheKey, value) {
+  redditResultCache.set(cacheKey, {
+    value,
+    expiresAt: Date.now() + REDDIT_RESULT_TTL_MS,
+  });
+}
+
+function getSubredditCooldown(subName) {
+  const entry = subredditCooldowns.get(subName);
+  if (!entry) return null;
+  if (Date.now() >= entry.expiresAt) {
+    subredditCooldowns.delete(subName);
+    return null;
+  }
+  return entry;
+}
+
+function setSubredditCooldown(subName, reason = "empty response") {
+  subredditCooldowns.set(subName, {
+    reason,
+    expiresAt: Date.now() + SUBREDDIT_EMPTY_TTL_MS,
+  });
+}
+
 // ── Search all of Reddit ─────────────────────────────────────
 async function searchReddit(query, token) {
   const headers = { "User-Agent": "SocialScanner/1.0" };
@@ -198,8 +251,16 @@ app.post("/api/reddit", async (req, res) => {
     const { subreddits = [], keywords = [], intentPatterns = [], toolTerms = [], searchAll = false } = req.body;
     if (!searchAll && !subreddits.length) return res.json({ threads: [] });
 
-    let token = await getRedditToken();
-    if (!token) token = await getRedditToken();
+    const cacheKey = getRedditCacheKey({ subreddits, intentPatterns, toolTerms, searchAll });
+    const cachedResult = getCachedRedditResult(cacheKey);
+    if (cachedResult) {
+      return res.json({
+        ...cachedResult,
+        debug: `${cachedResult.debug} | Cache: hit`,
+      });
+    }
+
+    const token = await getRedditToken();
     const threads = [];
     let allPosts = [];
     const fetchErrors = [];
@@ -214,11 +275,20 @@ app.post("/api/reddit", async (req, res) => {
     } else {
       for (const sub of subreddits) {
         const subName = sub.name || sub;
+        const cooldown = getSubredditCooldown(subName);
+        if (cooldown) {
+          fetchErrors.push(`${subName}: cooldown active (${cooldown.reason})`);
+          continue;
+        }
         try {
           const posts = await fetchSubredditPosts(subName, token);
-          if (posts.length === 0) fetchErrors.push(`${subName}: 0 posts (possibly rate-limited)`);
+          if (posts.length === 0) {
+            setSubredditCooldown(subName, "0 posts from Reddit");
+            fetchErrors.push(`${subName}: 0 posts (possibly rate-limited)`);
+          }
           allPosts.push(...posts.map((p) => ({ ...p, _sub: sub })));
         } catch (err) {
+          setSubredditCooldown(subName, err.message);
           fetchErrors.push(`${subName}: ${err.message}`);
           console.warn(`Failed to fetch ${subName}:`, err.message);
         }
@@ -265,7 +335,9 @@ app.post("/api/reddit", async (req, res) => {
 
     const debug = `Fetched ${allPosts.length} posts → ${intentMatched} matched intent → ${toolMatched} matched tool terms → ${threads.length} threads returned` + (fetchErrors.length ? ` | Errors: ${fetchErrors.join("; ")}` : "");
     console.log(debug);
-    res.json({ threads, debug });
+    const responseBody = { threads, debug };
+    setCachedRedditResult(cacheKey, responseBody);
+    res.json(responseBody);
   } catch (err) {
     console.error("Reddit API error:", err);
     res.status(500).json({ error: "Failed to fetch Reddit threads" });

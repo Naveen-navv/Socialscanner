@@ -8,7 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 app.use(express.static(join(__dirname, "dist")));
 
 // ── PostgreSQL ───────────────────────────────────────────────
@@ -134,7 +134,10 @@ async function fetchSubredditPosts(subName, token) {
   const seen = new Set();
   for (const result of [hotRes, newRes]) {
     if (result.status !== "fulfilled") continue;
-    const data = await result.value.json();
+    const res = result.value;
+    if (!res.ok) continue;
+    let data;
+    try { data = await res.json(); } catch { continue; }
     for (const child of data?.data?.children || []) {
       if (!seen.has(child.data.id)) { seen.add(child.data.id); posts.push(child.data); }
     }
@@ -149,7 +152,9 @@ async function searchReddit(query, token) {
   const base = token ? "https://oauth.reddit.com" : "https://www.reddit.com";
   const url = `${base}/search.json?q=${encodeURIComponent(query)}&sort=relevance&limit=100&type=link&t=week`;
   const res = await fetch(url, { headers });
-  const data = await res.json();
+  if (!res.ok) return [];
+  let data;
+  try { data = await res.json(); } catch { return []; }
   return (data?.data?.children || []).map((c) => c.data);
 }
 

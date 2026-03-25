@@ -111,7 +111,7 @@ async function getRedditToken() {
       headers: {
         Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
         "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "web:SocialScanner:v1.0 (by /u/kedil_app)",
+        "User-Agent": "SocialScanner/1.0",
       },
       body: "grant_type=client_credentials",
     });
@@ -133,7 +133,7 @@ async function getRedditToken() {
 // ── Fetch posts from a subreddit (hot + new) ─────────────────
 async function fetchSubredditPosts(subName, token) {
   const name = subName.replace(/^r\//, "");
-  const headers = { "User-Agent": "web:SocialScanner:v1.0 (by /u/kedil_app)" };
+  const headers = { "User-Agent": "SocialScanner/1.0" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const base = token ? "https://oauth.reddit.com" : "https://www.reddit.com";
   const [hotRes, newRes] = await Promise.allSettled([
@@ -157,7 +157,7 @@ async function fetchSubredditPosts(subName, token) {
 
 // ── Search all of Reddit ─────────────────────────────────────
 async function searchReddit(query, token) {
-  const headers = { "User-Agent": "web:SocialScanner:v1.0 (by /u/kedil_app)" };
+  const headers = { "User-Agent": "SocialScanner/1.0" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const base = token ? "https://oauth.reddit.com" : "https://www.reddit.com";
   const url = `${base}/search.json?q=${encodeURIComponent(query)}&sort=relevance&limit=100&type=link&t=week`;
@@ -170,7 +170,7 @@ async function searchReddit(query, token) {
 
 // ── Fetch top comment ────────────────────────────────────────
 async function fetchTopComment(postId, token) {
-  const headers = { "User-Agent": "web:SocialScanner:v1.0 (by /u/kedil_app)" };
+  const headers = { "User-Agent": "SocialScanner/1.0" };
   const url = token
     ? `https://oauth.reddit.com/comments/${postId}.json?limit=3&depth=1`
     : `https://www.reddit.com/comments/${postId}.json?limit=3&depth=1`;
@@ -294,7 +294,7 @@ app.get("/api/test", async (req, res) => {
       headers: {
         Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
         "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "web:SocialScanner:v1.0 (by /u/kedil_app)",
+        "User-Agent": "SocialScanner/1.0",
       },
       body: "grant_type=client_credentials",
     });

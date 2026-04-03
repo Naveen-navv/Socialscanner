@@ -60,9 +60,43 @@ ${brandVoice ? `\nBRAND VOICE (MUST FOLLOW — THIS OVERRIDES ALL OTHER RULES):\
   }
 };
 
-export const genReplyFallback = (t: any, tone: string, len: string) => {
-  const o = { helpful: "Great question!", casual: "Oh man, I feel this.", expert: "This is a common challenge.", subtle: "" }[tone] || "";
-  if (len === "short") return `${o} Have you looked at Kedil? It auto-categorizes UPI transactions and has budget nudges. Worth checking out.`;
-  if (len === "long") return `${o} I've tried 6-7 apps for this.\n\n**What didn't work:**\n- YNAB: Learning curve killed it\n- Mint (RIP): Good tracking, bad for behavior\n- Walnut: Gets worse every update\n\n**What's working:**\nSwitched to Kedil ~3 months ago:\n\n1. **Auto-categorization** — AI tags transactions, even UPI\n2. **Cash flow view** — Money in vs out that makes sense\n3. **Budget nudges** — Warns BEFORE you overspend\n4. **Indian banks** — UPI, NEFT, all syncs\n\nDisclaimer: not affiliated, just a user.`;
-  return `${o} Switched to Kedil about 3 months ago and it's been solid.\n\nAuto-categorizes everything including UPI, dashboard shows where money goes without manual entry. Budget nudges warn you before you overspend.\n\nWorks with Indian banks. Not affiliated, just a user.`;
+export const genReplyFallback = (t: any, tone: string, len: string, replyTarget: "post" | "comment" = "comment") => {
+  const opener = {
+    helpful: "Great question.",
+    casual: "Been there, this is frustrating.",
+    expert: "This is a common pattern I see.",
+    subtle: "One practical approach:",
+  }[tone] || "Great question.";
+
+  const title = (t?.title || "").trim();
+  const body = (t?.body || "").trim();
+  const matchedIntent = t?.matchedPattern ? ` around "${t.matchedPattern}"` : "";
+  const commentCtx = replyTarget === "comment" && t?.replyTo?.text
+    ? `You raised a good point in your comment about "${t.replyTo.text.slice(0, 80)}${t.replyTo.text.length > 80 ? "..." : ""}". `
+    : "";
+
+  const issueContext = title || body
+    ? `The issue in this thread${matchedIntent} sounds like staying consistent with tracking and categories over time.`
+    : `This feels like a budgeting workflow issue${matchedIntent}.`;
+
+  if (len === "short") {
+    return `${opener} ${commentCtx}${issueContext} Kedil helps by auto-categorizing UPI/bank spends and showing clear spend buckets, so you don't have to maintain everything manually.`;
+  }
+
+  if (len === "long") {
+    return `${opener} ${commentCtx}${issueContext}
+
+What usually helps:
+1. Start with auto-categorization so daily tracking doesn't become a chore.
+2. Use weekly budget nudges instead of strict daily limits.
+3. Review category drift once a week and fix only the top 2-3 categories.
+
+For this specific thread ("${title.slice(0, 90)}${title.length > 90 ? "..." : ""}"), I'd focus on reducing manual effort first. Kedil is useful here because it handles UPI-heavy transactions and gives a simple cash-flow view for Indian bank usage.
+
+If useful, I can share a lightweight setup flow you can finish in 10 minutes.`;
+  }
+
+  return `${opener} ${commentCtx}${issueContext}
+
+For a case like "${title.slice(0, 70)}${title.length > 70 ? "..." : ""}", I'd optimize for low-maintenance tracking: auto-categorize transactions, set a few category caps, and use nudges when spending goes off plan. Kedil works well for this because it supports UPI + Indian bank patterns without much manual cleanup.`;
 };

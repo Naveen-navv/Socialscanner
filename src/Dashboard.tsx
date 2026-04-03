@@ -47,6 +47,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
   const saveInFlight = useRef(false);
   const pendingSave = useRef(false);
   const snapshotRef = useRef<any>(null);
+  const hasHydratedRef = useRef(false);
 
   const [fa, setFa] = useState<any[]>([]); const [threads, setThreads] = useState<any[]>([]); const [ec, setEc] = useState({ tone: "helpful", length: "medium", bv: "" }); const [metrics, setMetrics] = useState<any[]>([]); const [bm, setBm] = useState<any[]>([]); const [intel, setIntel] = useState<any[]>([]);
 
@@ -157,6 +158,37 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     void quickScanIntel(id, sub);
   };
 
+  const applyLoadedState = (data: any) => {
+    const loadedFa = data?.fa || DEF_FA;
+    const loadedThreads = data?.threads || DEF_THREADS;
+    const loadedEc = data?.ec || { tone: "helpful", length: "medium", bv: "" };
+    const loadedMetrics = data?.metrics || DEF_METRICS;
+    const loadedBm = data?.bm || [];
+    const loadedToolTerms = data?.toolTerms || DEF_TOOL_TERMS;
+    const loadedSearchAll = data?.searchAll || false;
+    const loadedIntel = (data?.intel || DEF_INTEL).map(normalizeIntelEntry);
+
+    setFa(loadedFa);
+    setThreads(loadedThreads);
+    setEc(loadedEc);
+    setMetrics(loadedMetrics);
+    setBm(loadedBm);
+    setIntel(loadedIntel);
+    setToolTerms(loadedToolTerms);
+    setSearchAll(loadedSearchAll);
+
+    return { loadedFa, loadedThreads, loadedToolTerms, loadedSearchAll, loadedIntel };
+  };
+
+  const normalizeStatusText = (value: string | null | undefined) => {
+    if (!value) return value || "";
+    return value
+      .replaceAll("â€”", "-")
+      .replaceAll("â†’", "->")
+      .replaceAll("â†»", "Refresh")
+      .replaceAll("Ã—", "x");
+  };
+
   const fetchFromReddit = async (currentFa: any[], currentToolTerms: string[], useSearchAll = false) => {
     if (!useSearchAll && !currentFa.length) return;
     setRefreshing(true);
@@ -174,31 +206,101 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
       const DUMMY_IDS = new Set(["t1","t2","t3","t4","t5","t6"]);
       setThreads(prev => {
-        const worked = prev.filter(t => (t.status === "posted" || t.reply) && !DUMMY_IDS.has(t.id));
-        const workedIds = new Set(worked.map((t: any) => t.id));
-        const fresh = (data.threads || []).filter((t: any) => !workedIds.has(t.id));
-        return [...worked, ...fresh];
+        const preserved = prev.filter((t: any) => !DUMMY_IDS.has(t.id));
+        const mergedById = new Map<string, any>(preserved.map((t: any) => [t.id, t]));
+
+        for (const incoming of data.threads || []) {
+          const existing = mergedById.get(incoming.id);
+          mergedById.set(
+            incoming.id,
+            existing
+              ? {
+                  ...incoming,
+                  ...existing,
+                  title: incoming.title,
+                  sub: incoming.sub,
+                  subMembers: incoming.subMembers,
+                  score: incoming.score,
+                  comments: incoming.comments,
+                  time: incoming.time,
+                  intent: incoming.intent,
+                  matchedPattern: incoming.matchedPattern,
+                  author: incoming.author,
+                  authorKarma: incoming.authorKarma,
+                  body: incoming.body,
+                  replyTo: incoming.replyTo,
+                  url: incoming.url,
+                }
+              : incoming
+          );
+        }
+
+        return [...mergedById.values()];
       });
       if (data.threads?.length) {
         setScanError(null);
       } else {
-        setScanError(data.debug || "Reddit returned 0 matching threads â€” try broadening your intent patterns or subreddits in Monitor.");
+        setScanError(normalizeStatusText(data.debug) || "Reddit returned 0 matching threads - try broadening your intent patterns or subreddits in Monitor.");
       }
     } catch (err: any) {
-      setScanError(`Fetch failed: ${err.message} â€” check Railway logs & /api/test`);
+      setScanError(normalizeStatusText(`Fetch failed: ${err.message} - check Railway logs & /api/test`));
     } finally {
       setRefreshing(false);
     }
   };
 
   useEffect(() => {
+    let localData: any = null;
+    try {
+      const raw = localStorage.getItem(localBackupKey);
+      if (raw) localData = JSON.parse(raw);
+    } catch {}
+
+    const initialData = localData || {
+      fa: DEF_FA,
+      threads: DEF_THREADS,
+      ec: { tone: "helpful", length: "medium", bv: "" },
+      metrics: DEF_METRICS,
+      bm: [],
+      intel: DEF_INTEL,
+      toolTerms: DEF_TOOL_TERMS,
+      searchAll: false,
+    };
+
+    const initial = applyLoadedState(initialData);
+    setDataLoaded(true);
+    setSaveState("idle");
+    setSaveError(null);
+
+    for (const item of initial.loadedIntel) {
+      if (item.scanStatus === "scanning") {
+        void quickScanIntel(item.id, item.sub, initial.loadedThreads);
+      }
+    }
+
+    // Defer network refresh so first paint isn't blocked by Reddit calls.
+    setTimeout(() => { void fetchFromReddit(initial.loadedFa, initial.loadedToolTerms, initial.loadedSearchAll); }, 50);
+
     (async () => {
-      let remoteData: any = null;
       let remoteError: string | null = null;
       try {
-        const res = await fetch(`/api/data?email=${encodeURIComponent(normalizedEmail)}`);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2500);
+        const res = await fetch(`/api/data?email=${encodeURIComponent(normalizedEmail)}`, { signal: controller.signal });
+        clearTimeout(timeout);
+
         if (res.ok) {
-          remoteData = await res.json();
+          const remoteData = await res.json();
+          if (remoteData) {
+            const remote = applyLoadedState(remoteData);
+            for (const item of remote.loadedIntel) {
+              if (item.scanStatus === "scanning") {
+                void quickScanIntel(item.id, item.sub, remote.loadedThreads);
+              }
+            }
+            setSaveState("idle");
+            setSaveError(null);
+          }
         } else {
           let msg = `HTTP ${res.status}`;
           try {
@@ -208,50 +310,13 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
           remoteError = `Cloud sync unavailable (${msg})`;
         }
       } catch (err: any) {
-        remoteError = `Cloud sync unavailable (${err?.message || "network error"})`;
+        remoteError = `Cloud sync unavailable (${err?.name === "AbortError" ? "timeout" : err?.message || "network error"})`;
       }
-
-      let localData: any = null;
-      try {
-        const raw = localStorage.getItem(localBackupKey);
-        if (raw) localData = JSON.parse(raw);
-      } catch {}
-
-      const data = remoteData || localData;
-      const loadedFa = data?.fa || DEF_FA;
-      const loadedThreads = data?.threads || DEF_THREADS;
-      const loadedEc = data?.ec || { tone: "helpful", length: "medium", bv: "" };
-      const loadedMetrics = data?.metrics || DEF_METRICS;
-      const loadedBm = data?.bm || [];
-      const loadedToolTerms = data?.toolTerms || DEF_TOOL_TERMS;
-      const loadedSearchAll = data?.searchAll || false;
-      const loadedIntel = (data?.intel || DEF_INTEL).map(normalizeIntelEntry);
-
-      setFa(loadedFa);
-      setThreads(loadedThreads);
-      setEc(loadedEc);
-      setMetrics(loadedMetrics);
-      setBm(loadedBm);
-      setIntel(loadedIntel);
-      setToolTerms(loadedToolTerms);
-      setSearchAll(loadedSearchAll);
-      setDataLoaded(true);
 
       if (remoteError) {
         setSaveState("error");
         setSaveError(`${remoteError}. ${localData ? "Using local backup." : "Running in local-only mode until DB is reachable."}`);
-      } else {
-        setSaveState("idle");
-        setSaveError(null);
       }
-
-      for (const item of loadedIntel) {
-        if (item.scanStatus === "scanning") {
-          void quickScanIntel(item.id, item.sub, loadedThreads);
-        }
-      }
-
-      fetchFromReddit(loadedFa, loadedToolTerms, loadedSearchAll);
     })();
   }, []);
 
@@ -304,6 +369,10 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
 
   useEffect(() => {
     if (!dataLoaded) return;
+    if (!hasHydratedRef.current) {
+      hasHydratedRef.current = true;
+      return;
+    }
     if (timer.current) clearTimeout(timer.current);
     const snapshot = { fa, threads, ec, metrics, bm, intel, toolTerms, searchAll };
     snapshotRef.current = snapshot;
@@ -378,7 +447,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
         <div style={{ display: "flex", gap: 6 }}>{["all", "new", "posted"].map(f => <button key={f} onClick={() => setThreadFilter(f)} style={{ background: threadFilter === f ? C.accentBg : "transparent", color: threadFilter === f ? C.accent : C.muted, border: `1px solid ${threadFilter === f ? C.accent : C.border}`, borderRadius: 8, padding: "7px 16px", cursor: "pointer", fontSize: 13, fontWeight: 500, textTransform: "capitalize" }}>{f} ({threads.filter(t => f === "all" || t.status === f).length})</button>)}</div>
       </div>
-      {fl.length === 0 && !refreshing && <div style={{ textAlign: "center", padding: 60, color: C.muted }}>No leads yet â€” click â†» Refresh to scan Reddit</div>}
+      {fl.length === 0 && !refreshing && <div style={{ textAlign: "center", padding: 60, color: C.muted }}>No leads yet - click Refresh to scan Reddit</div>}
       {fl.map(t => <div key={t.id} onClick={() => { const defaultTarget: "comment" | "post" = t.replyTo ? "comment" : "post"; setReplyTarget(defaultTarget); setActiveThread(t); setDraftText(t.reply || genReplyFallback(t, ec.tone, ec.length, defaultTarget)); }} style={{ background: C.card, borderRadius: 10, padding: "16px 18px", marginBottom: 8, border: `1px solid ${C.border}`, cursor: "pointer", transition: "border-color 0.15s" }} onMouseEnter={e => (e.currentTarget.style.borderColor = C.accent)} onMouseLeave={e => (e.currentTarget.style.borderColor = C.border)}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 200 }}>

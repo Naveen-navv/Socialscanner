@@ -60,43 +60,109 @@ ${brandVoice ? `\nBRAND VOICE (MUST FOLLOW — THIS OVERRIDES ALL OTHER RULES):\
   }
 };
 
-export const genReplyFallback = (t: any, tone: string, len: string, replyTarget: "post" | "comment" = "comment") => {
-  const opener = {
-    helpful: "Great question.",
-    casual: "Been there, this is frustrating.",
-    expert: "This is a common pattern I see.",
-    subtle: "One practical approach:",
-  }[tone] || "Great question.";
+const hashText = (input: string) => {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return Math.abs(h >>> 0);
+};
 
+const pick = (items: string[], seed: number, offset = 0) => {
+  if (!items.length) return "";
+  return items[(seed + offset) % items.length];
+};
+
+const extractSignals = (text: string) => {
+  const t = (text || "").toLowerCase();
+  const hasUpi = /\bupi\b/.test(t);
+  const hasBankSync = /\bbank\b|\bsync\b|\bstatement\b/.test(t);
+  const hasCategory = /\bcategory|categori|split|bucket\b/.test(t);
+  const hasManual = /\bmanual|manually|tedious|time|effort\b/.test(t);
+  const hasOverwhelm = /\boverwhelm|messy|chaos|confus|inconsistent\b/.test(t);
+  return { hasUpi, hasBankSync, hasCategory, hasManual, hasOverwhelm };
+};
+
+const buildActionLine = (signals: ReturnType<typeof extractSignals>, seed: number) => {
+  const options = [
+    "Start with auto-categorization first, then tune only the top few categories once a week.",
+    "Set one weekly review block instead of checking every day so the system stays low effort.",
+    "Use category caps and nudges so you only intervene when spending drifts off-plan.",
+    "Keep your setup minimal at first: categories, recurring expenses, and one weekly check-in.",
+  ];
+  if (signals.hasManual) {
+    return "Reduce manual work first: automate transaction tagging, then review exceptions in batches.";
+  }
+  if (signals.hasCategory) {
+    return "Prioritize clean categories and weekly recategorization for edge cases instead of daily edits.";
+  }
+  return pick(options, seed, 3);
+};
+
+export const genReplyFallback = (t: any, tone: string, len: string, replyTarget: "post" | "comment" = "comment") => {
   const title = (t?.title || "").trim();
   const body = (t?.body || "").trim();
+  const seed = hashText(`${t?.id || ""}|${title}|${body}|${tone}|${len}|${replyTarget}`);
+
+  const openersByTone: Record<string, string[]> = {
+    helpful: ["Great question.", "This is a solid question to ask.", "You’re focusing on the right problem."],
+    casual: ["Been there, this is frustrating.", "Yeah, this can get annoying fast.", "Totally relatable problem."],
+    expert: ["This is a common pattern I see.", "This usually comes down to workflow design.", "There’s a repeatable fix for this."],
+    subtle: ["One practical approach:", "A low-friction way to handle this:", "A simple setup that works:"],
+  };
+  const opener = pick(openersByTone[tone] || openersByTone.helpful, seed);
+
   const matchedIntent = t?.matchedPattern ? ` around "${t.matchedPattern}"` : "";
   const commentCtx = replyTarget === "comment" && t?.replyTo?.text
     ? `You raised a good point in your comment about "${t.replyTo.text.slice(0, 80)}${t.replyTo.text.length > 80 ? "..." : ""}". `
     : "";
+  const signals = extractSignals(`${title} ${body}`);
+  const actionLine = buildActionLine(signals, seed);
 
-  const issueContext = title || body
-    ? `The issue in this thread${matchedIntent} sounds like staying consistent with tracking and categories over time.`
+  const contextVariants = [
+    `The issue in this thread${matchedIntent} sounds like staying consistent with tracking and categories over time.`,
+    `This looks like a sustainability problem${matchedIntent}: the workflow works for a week, then becomes heavy.`,
+    `This thread${matchedIntent} points to maintenance overhead more than motivation.`,
+  ];
+  const issueContext = (title || body)
+    ? pick(contextVariants, seed, 1)
     : `This feels like a budgeting workflow issue${matchedIntent}.`;
 
+  const fitLine = signals.hasUpi || signals.hasBankSync
+    ? "Kedil is useful here because it handles UPI and Indian bank transaction patterns with less manual cleanup."
+    : "Kedil is useful here because it keeps tracking lightweight with auto-categorization and simple nudges.";
+
   if (len === "short") {
-    return `${opener} ${commentCtx}${issueContext} Kedil helps by auto-categorizing UPI/bank spends and showing clear spend buckets, so you don't have to maintain everything manually.`;
+    return `${opener} ${commentCtx}${issueContext} ${actionLine} ${fitLine}`;
   }
 
   if (len === "long") {
+    const close = pick([
+      "If useful, I can share a 10-minute setup flow.",
+      "Happy to share the exact category structure if that helps.",
+      "If you want, I can suggest a starter template based on your use case.",
+    ], seed, 2);
     return `${opener} ${commentCtx}${issueContext}
 
 What usually helps:
-1. Start with auto-categorization so daily tracking doesn't become a chore.
-2. Use weekly budget nudges instead of strict daily limits.
-3. Review category drift once a week and fix only the top 2-3 categories.
+1. Keep daily interaction minimal and automate the repetitive parts.
+2. Review once a week, not continuously.
+3. Fix only high-impact categories first.
 
-For this specific thread ("${title.slice(0, 90)}${title.length > 90 ? "..." : ""}"), I'd focus on reducing manual effort first. Kedil is useful here because it handles UPI-heavy transactions and gives a simple cash-flow view for Indian bank usage.
+For this specific thread ("${title.slice(0, 90)}${title.length > 90 ? "..." : ""}"), I’d focus on reducing manual effort first. ${fitLine}
 
-If useful, I can share a lightweight setup flow you can finish in 10 minutes.`;
+${close}`;
   }
 
+  const mediumClosers = [
+    "That usually keeps the process consistent without feeling like extra admin.",
+    "This tends to improve consistency while keeping effort low.",
+    "It stays practical and avoids the burn-out cycle from over-tracking.",
+  ];
   return `${opener} ${commentCtx}${issueContext}
 
-For a case like "${title.slice(0, 70)}${title.length > 70 ? "..." : ""}", I'd optimize for low-maintenance tracking: auto-categorize transactions, set a few category caps, and use nudges when spending goes off plan. Kedil works well for this because it supports UPI + Indian bank patterns without much manual cleanup.`;
+For this case ("${title.slice(0, 70)}${title.length > 70 ? "..." : ""}"), I’d optimize for low-maintenance tracking. ${actionLine} ${fitLine}
+
+${pick(mediumClosers, seed, 4)}`;
 };

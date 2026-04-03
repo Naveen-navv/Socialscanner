@@ -88,48 +88,22 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     };
   };
 
-  const buildQuickIntelProfile = (sub: string, sourceThreads: any[]) => {
-    const subKey = sub.toLowerCase();
-    const relevant = sourceThreads.filter((t: any) => (t?.sub || "").toLowerCase() === subKey);
-    const sourceText = relevant.map((t: any) => `${t.title || ""} ${t.body || ""}`.toLowerCase()).join(" ");
-    const terms = sourceText
-      .replace(/[^a-z0-9\s]/g, " ")
-      .split(/\s+/)
-      .filter((w: string) => w.length > 3 && !["this", "that", "with", "from", "have", "your", "about", "they", "their", "into", "just", "will", "what", "when", "where", "which", "while"].includes(w));
-    const freq = new Map<string, number>();
-    for (const word of terms) freq.set(word, (freq.get(word) || 0) + 1);
-    const topWords = [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([w]) => w);
-    const confidence = relevant.length ? Math.min(88, 56 + relevant.length * 6) : 52;
-    const now = new Date();
-    const dateLabel = now.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-    const timeLabel = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    return {
-      lastScanned: `Analyzed at ${timeLabel}`,
-      confidence,
-      rules: relevant.length ? ["No self-promotion spam", "Keep responses helpful and specific", "Avoid generic copy-paste replies"] : ["No clear rule data yet", "Use respectful, practical language", "Avoid overt promotion"],
-      bestTimes: { peak: "Weekday mornings", avoid: "Late night low-engagement windows" },
-      toneProfile: { preferred: relevant.length ? "Helpful and practical" : "Balanced and informative", avoid: "Salesy or aggressive" },
-      topFormats: relevant.length
-        ? [{ format: "Short practical guidance", avgScore: 120 }, { format: "Experience + actionable steps", avgScore: 98 }]
-        : [{ format: "Concise troubleshooting", avgScore: 64 }],
-      whatWorks: [{ insight: relevant.length ? "Specific examples outperform generic advice" : "Start with concrete pain points", score: Math.max(62, confidence - 8) }],
-      whatFails: [{ insight: "Generic promotional replies are often ignored", score: 86 }],
-      keywords: { positive: topWords.length ? topWords : ["budget", "tracking", "expense"], negative: ["spam", "scam", "promo"] },
-      modStrictness: relevant.length ? 64 : 50,
-      sentimentBreakdown: { positive: 41, neutral: 39, negative: 20 },
-      learningLog: [{ date: dateLabel, entry: relevant.length ? `Quick scan used ${relevant.length} matched thread(s)` : "Quick scan ran with limited local context" }],
-      scanStatus: "analyzed",
-      scanMessage: null,
-    };
-  };
-
-  const quickScanIntel = async (id: string, sub: string, sourceThreads = threads) => {
+  const quickScanIntel = async (id: string, sub: string) => {
     setIntel((prev) => prev.map((x) => x.id === id ? { ...x, scanStatus: "scanning", scanMessage: "Analyzing subreddit patterns..." } : x));
     try {
-      const profile = await Promise.race([
-        new Promise<any>((resolve) => setTimeout(() => resolve(buildQuickIntelProfile(sub, sourceThreads)), 650)),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("Scan timed out. Retry to analyze again.")), 4500)),
-      ]);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const res = await fetch("/api/intel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sub }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      const profile = data?.profile;
+      if (!profile) throw new Error("Analysis service returned no profile");
       setIntel((prev) => prev.map((x) => x.id === id ? { ...x, ...profile } : x));
     } catch (err: any) {
       setIntel((prev) => prev.map((x) => x.id === id ? {
@@ -138,7 +112,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
         scanMessage: err?.message || "Scan failed.",
         lastScanned: "Scan failed",
         confidence: 0,
-        rules: ["Analysis failed  click retry."],
+        rules: ["Analysis failed - click retry."],
       } : x));
     }
   };
@@ -284,7 +258,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
 
     for (const item of initial.loadedIntel) {
       if (item.scanStatus === "scanning") {
-        void quickScanIntel(item.id, item.sub, initial.loadedThreads);
+        void quickScanIntel(item.id, item.sub);
       }
     }
 
@@ -321,10 +295,10 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
               const remote = applyLoadedState(remoteData);
               snapshotRef.current = remoteData;
               for (const item of remote.loadedIntel) {
-                if (item.scanStatus === "scanning") {
-                  void quickScanIntel(item.id, item.sub, remote.loadedThreads);
-                }
+              if (item.scanStatus === "scanning") {
+                void quickScanIntel(item.id, item.sub);
               }
+            }
             }
           }
           setSaveState("idle");
@@ -340,8 +314,14 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       }
 
       if (remoteError) {
-        setSaveState("error");
-        setSaveError(`${remoteError}. ${localData ? "Using local backup." : "Running in local-only mode until DB is reachable."}`);
+        if (localData) {
+          // Local snapshot is available, so avoid noisy error state on startup.
+          setSaveState("idle");
+          setSaveError(null);
+        } else {
+          setSaveState("error");
+          setSaveError(`${remoteError}. Running in local-only mode until DB is reachable.`);
+        }
       }
     })();
   }, []);

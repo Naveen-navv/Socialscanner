@@ -261,10 +261,11 @@ app.post("/api/reddit", async (req, res) => {
     }
 
     const token = await getRedditToken();
+    const hasOAuth = Boolean(token);
     const threads = [];
     let allPosts = [];
     const fetchErrors = [];
-    if (!token) fetchErrors.push("Reddit OAuth token unavailable, falling back to public endpoints");
+    if (!hasOAuth) fetchErrors.push("Reddit OAuth token unavailable, falling back to public endpoints");
 
     if (searchAll) {
       const queryTerms = intentPatterns.slice(0, 4).map((p) => `"${p}"`);
@@ -283,12 +284,12 @@ app.post("/api/reddit", async (req, res) => {
         try {
           const posts = await fetchSubredditPosts(subName, token);
           if (posts.length === 0) {
-            setSubredditCooldown(subName, "0 posts from Reddit");
-            fetchErrors.push(`${subName}: 0 posts (possibly rate-limited)`);
+            if (hasOAuth) setSubredditCooldown(subName, "0 posts from Reddit");
+            fetchErrors.push(`${subName}: 0 posts (${hasOAuth ? "possibly rate-limited" : "public endpoint returned empty"})`);
           }
           allPosts.push(...posts.map((p) => ({ ...p, _sub: sub })));
         } catch (err) {
-          setSubredditCooldown(subName, err.message);
+          if (hasOAuth) setSubredditCooldown(subName, err.message);
           fetchErrors.push(`${subName}: ${err.message}`);
           console.warn(`Failed to fetch ${subName}:`, err.message);
         }
@@ -336,7 +337,8 @@ app.post("/api/reddit", async (req, res) => {
     const debug = `Fetched ${allPosts.length} posts → ${intentMatched} matched intent → ${toolMatched} matched tool terms → ${threads.length} threads returned` + (fetchErrors.length ? ` | Errors: ${fetchErrors.join("; ")}` : "");
     console.log(debug);
     const responseBody = { threads, debug };
-    setCachedRedditResult(cacheKey, responseBody);
+    const shouldCache = threads.length > 0 && fetchErrors.length === 0;
+    if (shouldCache) setCachedRedditResult(cacheKey, responseBody);
     res.json(responseBody);
   } catch (err) {
     console.error("Reddit API error:", err);

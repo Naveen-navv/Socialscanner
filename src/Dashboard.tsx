@@ -69,6 +69,14 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     ...snapshot,
     _meta: { ...(snapshot?._meta || {}), savedAt: Date.now() },
   });
+  const saveLocalSnapshot = (snapshot: any) => {
+    const stamped = withSnapshotMeta(snapshot);
+    snapshotRef.current = stamped;
+    try {
+      localStorage.setItem(localBackupKey, JSON.stringify(stamped));
+    } catch {}
+    return stamped;
+  };
 
   const normalizeIntelEntry = (si: any) => {
     const scanningLike = [si?.lastScanned, ...(si?.rules || []), ...(si?.whatWorks || []).map((w: any) => w?.insight || ""), ...(si?.whatFails || []).map((w: any) => w?.insight || "")]
@@ -309,7 +317,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
           if (remoteData) {
             const currentSavedAt = getSnapshotSavedAt(snapshotRef.current);
             const remoteSavedAt = getSnapshotSavedAt(remoteData);
-            if (remoteSavedAt >= currentSavedAt) {
+            if (!localData || remoteSavedAt > currentSavedAt) {
               const remote = applyLoadedState(remoteData);
               snapshotRef.current = remoteData;
               for (const item of remote.loadedIntel) {
@@ -339,7 +347,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
   }, []);
 
   const persistSnapshot = async (snapshot: any) => {
-    const stampedSnapshot = withSnapshotMeta(snapshot);
+    const stampedSnapshot = snapshot?._meta?.savedAt ? snapshot : withSnapshotMeta(snapshot);
     snapshotRef.current = stampedSnapshot;
     if (saveInFlight.current) {
       pendingSave.current = true;
@@ -349,10 +357,6 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     saveInFlight.current = true;
     setSaveState("saving");
     setSaveError(null);
-
-    try {
-      localStorage.setItem(localBackupKey, JSON.stringify(stampedSnapshot));
-    } catch {}
 
     if (!normalizedEmail) {
       setLastSaved(new Date().toLocaleTimeString());
@@ -405,8 +409,8 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     }
     if (timer.current) clearTimeout(timer.current);
     const snapshot = { fa, threads, ec, metrics, bm, intel, toolTerms, searchAll };
-    snapshotRef.current = snapshot;
-    timer.current = setTimeout(() => { void persistSnapshot(snapshot); }, 800);
+    const localSnapshot = saveLocalSnapshot(snapshot);
+    timer.current = setTimeout(() => { void persistSnapshot(localSnapshot); }, 800);
     return () => { if (timer.current) clearTimeout(timer.current); };
   }, [fa, threads, ec, metrics, bm, intel, toolTerms, searchAll, dataLoaded]);
 

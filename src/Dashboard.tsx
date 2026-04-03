@@ -64,6 +64,11 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
   const [searchAll, setSearchAll] = useState(false);
   const normalizedEmail = (user?.email || "").toLowerCase().trim();
   const localBackupKey = `ss_data_backup:${normalizedEmail}`;
+  const getSnapshotSavedAt = (data: any) => Number(data?._meta?.savedAt || 0);
+  const withSnapshotMeta = (snapshot: any) => ({
+    ...snapshot,
+    _meta: { ...(snapshot?._meta || {}), savedAt: Date.now() },
+  });
 
   const normalizeIntelEntry = (si: any) => {
     const scanningLike = [si?.lastScanned, ...(si?.rules || []), ...(si?.whatWorks || []).map((w: any) => w?.insight || ""), ...(si?.whatFails || []).map((w: any) => w?.insight || "")]
@@ -264,6 +269,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     };
 
     const initial = applyLoadedState(initialData);
+    snapshotRef.current = initialData;
     setDataLoaded(true);
     setSaveState("idle");
     setSaveError(null);
@@ -301,10 +307,15 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
 
           const remoteData = await res.json();
           if (remoteData) {
-            const remote = applyLoadedState(remoteData);
-            for (const item of remote.loadedIntel) {
-              if (item.scanStatus === "scanning") {
-                void quickScanIntel(item.id, item.sub, remote.loadedThreads);
+            const currentSavedAt = getSnapshotSavedAt(snapshotRef.current);
+            const remoteSavedAt = getSnapshotSavedAt(remoteData);
+            if (remoteSavedAt >= currentSavedAt) {
+              const remote = applyLoadedState(remoteData);
+              snapshotRef.current = remoteData;
+              for (const item of remote.loadedIntel) {
+                if (item.scanStatus === "scanning") {
+                  void quickScanIntel(item.id, item.sub, remote.loadedThreads);
+                }
               }
             }
           }
@@ -328,8 +339,8 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
   }, []);
 
   const persistSnapshot = async (snapshot: any) => {
-    if (!normalizedEmail) return;
-    snapshotRef.current = snapshot;
+    const stampedSnapshot = withSnapshotMeta(snapshot);
+    snapshotRef.current = stampedSnapshot;
     if (saveInFlight.current) {
       pendingSave.current = true;
       return;
@@ -340,14 +351,26 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     setSaveError(null);
 
     try {
-      localStorage.setItem(localBackupKey, JSON.stringify(snapshot));
+      localStorage.setItem(localBackupKey, JSON.stringify(stampedSnapshot));
     } catch {}
+
+    if (!normalizedEmail) {
+      setLastSaved(new Date().toLocaleTimeString());
+      setSaveState("saved");
+      saveInFlight.current = false;
+      if (pendingSave.current) {
+        pendingSave.current = false;
+        const nextSnapshot = snapshotRef.current;
+        if (nextSnapshot) void persistSnapshot(nextSnapshot);
+      }
+      return;
+    }
 
     try {
       const res = await fetch("/api/data", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: normalizedEmail, data: snapshot }),
+        body: JSON.stringify({ email: normalizedEmail, data: stampedSnapshot }),
       });
 
       if (!res.ok) {

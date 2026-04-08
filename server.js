@@ -261,6 +261,99 @@ async function fetchRedditListingFromBase(target, endpoints, token) {
   return { posts, errors, statuses };
 }
 
+function decodeHtmlEntities(input = "") {
+  return input
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&#32;/g, " ")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)));
+}
+
+function stripHtml(input = "") {
+  return input
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<\/h[1-6]>/gi, "\n")
+    .replace(/<li>/gi, "- ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function extractXmlTag(block, tagName) {
+  const match = block.match(new RegExp(`<${tagName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tagName}>`, "i"));
+  return match ? match[1] : "";
+}
+
+function extractXmlAttr(block, tagName, attrName) {
+  const match = block.match(new RegExp(`<${tagName}[^>]*\\b${attrName}="([^"]+)"`, "i"));
+  return match ? match[1] : "";
+}
+
+function parseRedditFeedPosts(feedText, subName) {
+  const entries = feedText.match(/<entry>[\s\S]*?<\/entry>/gi) || [];
+  return entries.map((entry) => {
+    const rawTitle = decodeHtmlEntities(extractXmlTag(entry, "title"));
+    const rawContent = decodeHtmlEntities(extractXmlTag(entry, "content"));
+    const cleanedContent = rawContent
+      .replace(/<!--\s*SC_OFF\s*-->|<!--\s*SC_ON\s*-->/gi, " ")
+      .replace(/\s+submitted by[\s\S]*$/i, " ")
+      .trim();
+    const permalink = extractXmlAttr(entry, "link", "href") || "";
+    const postId = extractXmlTag(entry, "id").replace(/^t3_/, "") || permalink.split("/comments/")[1]?.split("/")[0] || "";
+    const published = extractXmlTag(entry, "published") || extractXmlTag(entry, "updated");
+    const createdUtc = published ? Math.floor(new Date(published).getTime() / 1000) : Math.floor(Date.now() / 1000);
+    const author = decodeHtmlEntities(extractXmlTag(entry, "name")).replace(/^\/u\//i, "") || "unknown";
+
+    return {
+      id: postId,
+      title: rawTitle.trim(),
+      selftext: stripHtml(cleanedContent),
+      permalink: permalink.replace(/^https?:\/\/(?:www|old)\.reddit\.com/i, ""),
+      created_utc: createdUtc,
+      author,
+      subreddit: subName.replace(/^r\//i, ""),
+      score: 0,
+      num_comments: 0,
+    };
+  }).filter((post) => post.id && post.title);
+}
+
+async function fetchSubredditFeedPosts(subName) {
+  const name = subName.replace(/^r\//i, "");
+  const targets = REDDIT_PUBLIC_BASES;
+  const headers = { "User-Agent": REDDIT_USER_AGENT, "Accept": "application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.1" };
+  const errors = [];
+  const statuses = [];
+
+  for (const target of targets) {
+    try {
+      const res = await fetch(`${target.base}/r/${name}/.rss`, { headers });
+      statuses.push(`${target.label}:rss:${res.status}`);
+      const text = await res.text();
+      if (!res.ok) {
+        errors.push(`${target.label}:rss: ${formatRedditHttpError(res.status, text)}`);
+        continue;
+      }
+      const posts = parseRedditFeedPosts(text, subName);
+      if (posts.length > 0) return { posts, errors, statuses };
+      errors.push(`${target.label}:rss: feed returned no parsable posts`);
+    } catch (err) {
+      errors.push(`${target.label}:rss: ${(err && err.message) || "request failed"}`);
+    }
+  }
+
+  return { posts: [], errors, statuses };
+}
+
 async function fetchSubredditPosts(subName, token) {
   const name = subName.replace(/^r\//, "");
   const endpoints = [
@@ -276,6 +369,13 @@ async function fetchSubredditPosts(subName, token) {
     if (result.posts.length > 0) return result;
     fallbackErrors.push(...result.errors);
     fallbackStatuses.push(...result.statuses);
+  }
+
+  if (!token) {
+    const feedResult = await fetchSubredditFeedPosts(subName);
+    if (feedResult.posts.length > 0) return feedResult;
+    fallbackErrors.push(...feedResult.errors);
+    fallbackStatuses.push(...feedResult.statuses);
   }
 
   return { posts: [], errors: fallbackErrors, statuses: fallbackStatuses };

@@ -1,6 +1,6 @@
-﻿import { useState, useEffect, useRef } from "react";
+﻿import { useState, useEffect, useMemo, useRef } from "react";
 import { C, SUBS_DB, DEF_FA, DEF_THREADS, DEF_TOOL_TERMS, DEF_METRICS, DEF_INTEL, TONES } from "./constants";
-import { genReplyAI, genReplyFallback } from "./ai";
+import { filterByIntent, genReplyAI, genReplyFallback } from "./ai";
 
 const Badge = ({ children, color = C.accent, onRemove }: { children: React.ReactNode; color?: string; onRemove?: () => void }) => (
   <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, padding: "4px 10px", borderRadius: 6, background: `${color}18`, color, border: `1px solid ${color}35`, fontWeight: 500 }}>
@@ -62,6 +62,9 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
   const [scanError, setScanError] = useState<string | null>(null);
   const [toolTerms, setToolTerms] = useState<string[]>(DEF_TOOL_TERMS);
   const [searchAll, setSearchAll] = useState(false);
+  const [testPostText, setTestPostText] = useState("");
+  const [testLoading, setTestLoading] = useState(false);
+  const [testResult, setTestResult] = useState<any | null>(null);
   const normalizedEmail = (user?.email || "").toLowerCase().trim();
   const localBackupKey = `ss_data_backup:${normalizedEmail}`;
   const getSnapshotSavedAt = (data: any) => Number(data?._meta?.savedAt || 0);
@@ -87,6 +90,15 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       scanMessage: si?.scanMessage || null,
     };
   };
+
+  const normalizeFocusArea = (focus: any) => ({
+    ...focus,
+    brandKeywords: focus?.brandKeywords || [],
+    competitors: focus?.competitors || [],
+    subreddits: focus?.subreddits || [],
+    intentPatterns: focus?.intentPatterns || [],
+    intentDescription: focus?.intentDescription || "",
+  });
 
   const quickScanIntel = async (id: string, sub: string) => {
     setIntel((prev) => prev.map((x) => x.id === id ? { ...x, scanStatus: "scanning", scanMessage: "Analyzing subreddit patterns..." } : x));
@@ -146,7 +158,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
   };
 
   const applyLoadedState = (data: any) => {
-    const loadedFa = data?.fa || DEF_FA;
+    const loadedFa = (data?.fa || DEF_FA).map(normalizeFocusArea);
     const loadedThreads = data?.threads || DEF_THREADS;
     const loadedEc = data?.ec || { tone: "helpful", length: "medium", bv: "" };
     const loadedMetrics = data?.metrics || DEF_METRICS;
@@ -172,6 +184,80 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     return value;
   };
 
+  const normalizedToolTerms = useMemo(
+    () => toolTerms.map((term) => term.toLowerCase().trim()).filter(Boolean),
+    [toolTerms]
+  );
+
+  const threadMatchesActiveConfig = (thread: any) => {
+    if (normalizedToolTerms.length > 0) {
+      const text = `${thread?.title || ""} ${thread?.body || ""} ${thread?.replyTo?.text || ""}`.toLowerCase();
+      if (!normalizedToolTerms.some((term) => text.includes(term))) return false;
+    }
+
+    const matchingFocusAreas = fa.filter((focus) => focusAreaMatchesThread(focus, thread, searchAll));
+    if (!matchingFocusAreas.length) return false;
+
+    const storedIntentDescription = String(thread?.intentFilterDescription || "");
+    if (!storedIntentDescription) return true;
+
+    return matchingFocusAreas.some((focus) => String(focus.intentDescription || "") === storedIntentDescription);
+  };
+
+  const visibleThreads = useMemo(
+    () => threads.filter(threadMatchesActiveConfig),
+    [threads, fa, searchAll, normalizedToolTerms]
+  );
+
+  useEffect(() => {
+    if (activeThread && !visibleThreads.some((thread) => thread.id === activeThread.id)) {
+      setActiveThread(null);
+    }
+  }, [activeThread, visibleThreads]);
+
+  useEffect(() => {
+    setTestPostText("");
+    setTestResult(null);
+    setTestLoading(false);
+  }, [selFA]);
+
+  const focusAreaMatchesThread = (focus: any, thread: any, useSearchAll = false) => {
+    const subName = String(thread?.sub || "").toLowerCase().trim();
+    const text = `${thread?.title || ""} ${thread?.body || ""}`.toLowerCase();
+    const matchedPattern = String(thread?.matchedPattern || "").toLowerCase().trim();
+    const subredditMatch = useSearchAll || (focus.subreddits || []).some((sub: any) => String(sub?.name || sub || "").toLowerCase().trim() === subName);
+    const patternMatch = (focus.intentPatterns || []).some((pattern: string) => {
+      const normalizedPattern = pattern.toLowerCase().trim();
+      return normalizedPattern && (matchedPattern === normalizedPattern || text.includes(normalizedPattern));
+    });
+    return subredditMatch && patternMatch;
+  };
+
+  const applyIntentFilters = async (incomingThreads: any[], currentFa: any[], useSearchAll = false) => {
+    const filteredThreads = [];
+    for (const thread of incomingThreads) {
+      const matchingFocusAreas = currentFa.filter((focus) => focusAreaMatchesThread(focus, thread, useSearchAll));
+      if (!matchingFocusAreas.length) continue;
+
+      let passingIntentResult: { reason: string; intentDescription: string } | null = null;
+      for (const focus of matchingFocusAreas) {
+        const result = await filterByIntent(thread, focus.intentDescription || "");
+        if (result.pass) {
+          passingIntentResult = { reason: result.reason, intentDescription: focus.intentDescription || "" };
+          break;
+        }
+      }
+
+      if (!passingIntentResult) continue;
+      filteredThreads.push({
+        ...thread,
+        intentFilterReason: passingIntentResult.reason,
+        intentFilterDescription: passingIntentResult.intentDescription,
+      });
+    }
+    return filteredThreads;
+  };
+
   const fetchFromReddit = async (currentFa: any[], currentToolTerms: string[], useSearchAll = false) => {
     if (!useSearchAll && !currentFa.length) return;
     setRefreshing(true);
@@ -187,12 +273,13 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
+      const filteredIncomingThreads = await applyIntentFilters(data.threads || [], currentFa, useSearchAll);
       const DUMMY_IDS = new Set(["t1","t2","t3","t4","t5","t6"]);
       setThreads(prev => {
         const preserved = prev.filter((t: any) => !DUMMY_IDS.has(t.id));
         const mergedById = new Map<string, any>(preserved.map((t: any) => [t.id, t]));
 
-        for (const incoming of data.threads || []) {
+        for (const incoming of filteredIncomingThreads) {
           const existing = mergedById.get(incoming.id);
           mergedById.set(
             incoming.id,
@@ -213,6 +300,8 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
                   body: incoming.body,
                   replyTo: incoming.replyTo,
                   url: incoming.url,
+                  intentFilterReason: incoming.intentFilterReason,
+                  intentFilterDescription: incoming.intentFilterDescription,
                 }
               : incoming
           );
@@ -220,7 +309,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
 
         return [...mergedById.values()];
       });
-      if (data.threads?.length) {
+      if (filteredIncomingThreads.length) {
         setScanError(null);
       } else {
         setScanError(normalizeStatusText(data.debug) || "Reddit returned 0 matching threads - try broadening your intent patterns or subreddits in Monitor.");
@@ -428,15 +517,66 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
         <div style={{ marginBottom: 28 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}><span style={{ fontSize: 13, fontWeight: 700, color: C.text, textTransform: "uppercase", letterSpacing: 1 }}>Problem Search Terms</span><span style={{ fontSize: 12, color: C.muted }}>{f.brandKeywords.length} terms</span></div><TagInput tags={f.brandKeywords} setTags={t => updateFA(f.id, { brandKeywords: t })} placeholder="Problem search term..." color={C.accent} /></div>
         <div style={{ marginBottom: 28 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}><span style={{ fontSize: 13, fontWeight: 700, color: C.text, textTransform: "uppercase", letterSpacing: 1 }}>Competitors</span><span style={{ fontSize: 12, color: C.muted }}>{f.competitors.length} tracked</span></div><TagInput tags={f.competitors} setTags={t => updateFA(f.id, { competitors: t })} placeholder="Competitor..." color={C.orange} /></div>
         <div style={{ marginBottom: 28 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}><span style={{ fontSize: 13, fontWeight: 700, color: C.text, textTransform: "uppercase", letterSpacing: 1 }}>Subreddits</span><span style={{ fontSize: 12, color: C.muted }}>{f.subreddits.length} active</span></div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>{f.subreddits.map((s: any) => <span key={s.name} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, padding: "6px 12px", borderRadius: 8, background: `${C.blue}15`, color: C.blue, border: `1px solid ${C.blue}30` }}>{s.name} <span style={{ fontSize: 11, color: C.muted }}>{s.members}</span><span onClick={() => updateFA(f.id, { subreddits: f.subreddits.filter((x: any) => x.name !== s.name) })} style={{ cursor: "pointer", opacity: 0.6, fontWeight: 700 }}></span></span>)}</div>
-          <SubAdd onAdd={(n, m) => { if (!f.subreddits.find((s: any) => s.name === n)) updateFA(f.id, { subreddits: [...f.subreddits, { name: n, members: m }] }); }} />
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+            {f.subreddits.map((s: any) => (
+              <Badge key={s.name} color={C.blue} onRemove={() => updateFA(f.id, { subreddits: f.subreddits.filter((x: any) => x.name !== s.name) })}>
+                {s.name} <span style={{ fontSize: 11, color: C.muted }}>{s.members}</span>
+              </Badge>
+            ))}
+          </div>
+          <SubAdd onAdd={(n, m) => { if (!f.subreddits.find((s: any) => s.name.toLowerCase() === n.toLowerCase())) updateFA(f.id, { subreddits: [...f.subreddits, { name: n, members: m }] }); }} />
+        </div>
+        <div style={{ marginBottom: 28 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: C.text, textTransform: "uppercase", letterSpacing: 1 }}>Intent Filter</span>
+            <span style={{ fontSize: 12, color: C.muted }}>AI-powered</span>
+          </div>
+          <textarea
+            value={f.intentDescription || ""}
+            onChange={e => updateFA(f.id, { intentDescription: e.target.value })}
+            placeholder="Describe who you want to capture. e.g. Someone struggling to track salary, EMIs, or household expenses and looking for a simpler budgeting method"
+            rows={3}
+            style={{ width: "100%", padding: "10px 14px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 13, resize: "vertical", boxSizing: "border-box", fontFamily: "inherit", lineHeight: 1.5 }}
+          />
         </div>
         <div style={{ marginBottom: 28 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}><span style={{ fontSize: 13, fontWeight: 700, color: C.text, textTransform: "uppercase", letterSpacing: 1 }}>Intent Patterns</span><span style={{ fontSize: 12, color: C.muted }}>{f.intentPatterns.length} patterns</span></div><TagInput tags={f.intentPatterns} setTags={t => updateFA(f.id, { intentPatterns: t })} placeholder='Pattern e.g. "best"...' color={C.purple} /></div>
+        <div style={{ marginBottom: 28 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: C.text, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>Test a Post</div>
+          <textarea
+            value={testPostText}
+            onChange={e => setTestPostText(e.target.value)}
+            placeholder="Paste Reddit post title and body here to test against your intent filter..."
+            rows={4}
+            style={{ width: "100%", padding: "10px 14px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 13, resize: "vertical", boxSizing: "border-box", fontFamily: "inherit", lineHeight: 1.5, marginBottom: 10 }}
+          />
+          <button
+            onClick={async () => {
+              if (!testPostText.trim() || !f.intentDescription?.trim()) return;
+              setTestLoading(true);
+              setTestResult(null);
+              const result = await filterByIntent({ title: testPostText, body: "", sub: "test" }, f.intentDescription);
+              setTestResult(result);
+              setTestLoading(false);
+            }}
+            disabled={!testPostText.trim() || !f.intentDescription?.trim() || testLoading}
+            style={{ background: testLoading || !testPostText.trim() || !f.intentDescription?.trim() ? C.border : C.accent, color: "#fff", border: "none", borderRadius: 8, padding: "9px 20px", cursor: testLoading || !testPostText.trim() || !f.intentDescription?.trim() ? "not-allowed" : "pointer", fontWeight: 600, fontSize: 13, marginBottom: 12 }}
+          >
+            {testLoading ? "Checking..." : "Test Intent Filter"}
+          </button>
+          {testResult && (
+            <div style={{ padding: "12px 16px", borderRadius: 8, background: testResult.pass ? `${C.green}15` : `${C.danger}15`, border: `1px solid ${testResult.pass ? C.green : C.danger}` }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: testResult.pass ? C.green : C.danger, marginBottom: 4 }}>
+                {testResult.pass ? "Match - goes to Leads" : "No match - filtered out"}
+              </div>
+              <div style={{ fontSize: 13, color: C.muted }}>{testResult.reason}</div>
+            </div>
+          )}
+        </div>
       </div>);
     }
     return (<div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24, flexWrap: "wrap", gap: 12 }}><div><h2 style={{ margin: 0, fontSize: 22, color: C.text, fontWeight: 700 }}>Monitor</h2><p style={{ margin: "4px 0 0", fontSize: 13, color: C.muted }}>Setup focus areas with keywords, competitors & subreddits</p></div><button onClick={() => setShowNewFA(true)} style={{ background: C.accent, color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", cursor: "pointer", fontWeight: 600, fontSize: 14 }}>+ New</button></div>
-      {showNewFA && <div style={{ background: C.card, borderRadius: 12, padding: 20, marginBottom: 20, border: `1px solid ${C.border}` }}><input value={newFAName} onChange={e => setNewFAName(e.target.value)} placeholder="Focus area name..." onKeyDown={e => { if (e.key === "Enter" && newFAName.trim()) { setFa(p => [...p, { id: `fa_${Date.now()}`, name: newFAName.trim(), icon: "*", brandKeywords: [], competitors: [], subreddits: [], intentPatterns: ["best", "vs", "alternative", "review"] }]); setNewFAName(""); setShowNewFA(false); } }} style={{ width: "100%", padding: "10px 14px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 14, marginBottom: 12, boxSizing: "border-box" }} /><div style={{ display: "flex", gap: 8 }}><button onClick={() => { if (newFAName.trim()) { setFa(p => [...p, { id: `fa_${Date.now()}`, name: newFAName.trim(), icon: "*", brandKeywords: [], competitors: [], subreddits: [], intentPatterns: ["best", "vs", "alternative", "review"] }]); setNewFAName(""); setShowNewFA(false); } }} style={{ background: C.accent, color: "#fff", border: "none", borderRadius: 8, padding: "8px 20px", cursor: "pointer", fontWeight: 600 }}>Create</button><button onClick={() => { setShowNewFA(false); setNewFAName(""); }} style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 20px", cursor: "pointer" }}>Cancel</button></div></div>}
+      {showNewFA && <div style={{ background: C.card, borderRadius: 12, padding: 20, marginBottom: 20, border: `1px solid ${C.border}` }}><input value={newFAName} onChange={e => setNewFAName(e.target.value)} placeholder="Focus area name..." onKeyDown={e => { if (e.key === "Enter" && newFAName.trim()) { setFa(p => [...p, { id: `fa_${Date.now()}`, name: newFAName.trim(), icon: "*", brandKeywords: [], competitors: [], subreddits: [], intentDescription: "", intentPatterns: ["best", "vs", "alternative", "review"] }]); setNewFAName(""); setShowNewFA(false); } }} style={{ width: "100%", padding: "10px 14px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 14, marginBottom: 12, boxSizing: "border-box" }} /><div style={{ display: "flex", gap: 8 }}><button onClick={() => { if (newFAName.trim()) { setFa(p => [...p, { id: `fa_${Date.now()}`, name: newFAName.trim(), icon: "*", brandKeywords: [], competitors: [], subreddits: [], intentDescription: "", intentPatterns: ["best", "vs", "alternative", "review"] }]); setNewFAName(""); setShowNewFA(false); } }} style={{ background: C.accent, color: "#fff", border: "none", borderRadius: 8, padding: "8px 20px", cursor: "pointer", fontWeight: 600 }}>Create</button><button onClick={() => { setShowNewFA(false); setNewFAName(""); }} style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 20px", cursor: "pointer" }}>Cancel</button></div></div>}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 16 }}>{fa.map(f => <div key={f.id} onClick={() => setSelFA(f.id)} style={{ background: C.card, borderRadius: 12, padding: 20, cursor: "pointer", border: `1px solid ${C.border}`, borderLeft: `4px solid ${C.accent}`, transition: "transform 0.15s", position: "relative" }} onMouseEnter={e => (e.currentTarget.style.transform = "translateY(-2px)")} onMouseLeave={e => (e.currentTarget.style.transform = "none")}><button onClick={e => { e.stopPropagation(); setFa(p => p.filter(x => x.id !== f.id)); }} style={{ position: "absolute", top: 10, right: 12, background: "none", border: "none", color: C.muted, cursor: "pointer", opacity: 0.3 }} onMouseEnter={e => (e.currentTarget.style.opacity = "1")} onMouseLeave={e => (e.currentTarget.style.opacity = "0.3")}>x</button><div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}><span style={{ fontSize: 24 }}>{f.icon}</span><h3 style={{ margin: 0, fontSize: 18, color: C.text, fontWeight: 700 }}>{f.name}</h3></div><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 12 }}><div style={{ color: C.muted }}><span style={{ color: C.accent, fontWeight: 700 }}>{f.brandKeywords.length}</span> problem terms</div><div style={{ color: C.muted }}><span style={{ color: C.orange, fontWeight: 700 }}>{f.competitors.length}</span> competitors</div><div style={{ color: C.muted }}><span style={{ color: C.blue, fontWeight: 700 }}>{f.subreddits.length}</span> subreddits</div><div style={{ color: C.muted }}><span style={{ color: C.purple, fontWeight: 700 }}>{f.intentPatterns.length}</span> patterns</div></div></div>)}</div>
       {fa.length === 0 && !showNewFA && <div style={{ textAlign: "center", padding: 60, color: C.muted }}>No focus areas</div>}
     </div>);
@@ -444,7 +584,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
 
   const renderLeads = () => {
     if (activeThread) return renderWorkspace();
-    const fl = threadFilter === "all" ? threads : threads.filter(t => t.status === threadFilter);
+    const fl = threadFilter === "all" ? visibleThreads : visibleThreads.filter(t => t.status === threadFilter);
     return (<div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
         <div><h2 style={{ margin: 0, fontSize: 22, color: C.text, fontWeight: 700 }}>Leads</h2><p style={{ margin: "4px 0 0", fontSize: 13, color: C.muted }}>High-intent threads from Monitor</p></div>
@@ -459,7 +599,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       </div>
       {scanError && <div style={{ marginBottom: 16, padding: "12px 16px", background: `${C.danger}15`, border: `1px solid ${C.danger}40`, borderRadius: 10, fontSize: 13, color: C.danger }}>{scanError}</div>}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
-        <div style={{ display: "flex", gap: 6 }}>{["all", "new", "posted"].map(f => <button key={f} onClick={() => setThreadFilter(f)} style={{ background: threadFilter === f ? C.accentBg : "transparent", color: threadFilter === f ? C.accent : C.muted, border: `1px solid ${threadFilter === f ? C.accent : C.border}`, borderRadius: 8, padding: "7px 16px", cursor: "pointer", fontSize: 13, fontWeight: 500, textTransform: "capitalize" }}>{f} ({threads.filter(t => f === "all" || t.status === f).length})</button>)}</div>
+        <div style={{ display: "flex", gap: 6 }}>{["all", "new", "posted"].map(f => <button key={f} onClick={() => setThreadFilter(f)} style={{ background: threadFilter === f ? C.accentBg : "transparent", color: threadFilter === f ? C.accent : C.muted, border: `1px solid ${threadFilter === f ? C.accent : C.border}`, borderRadius: 8, padding: "7px 16px", cursor: "pointer", fontSize: 13, fontWeight: 500, textTransform: "capitalize" }}>{f} ({visibleThreads.filter(t => f === "all" || t.status === f).length})</button>)}</div>
       </div>
       {fl.length === 0 && !refreshing && <div style={{ textAlign: "center", padding: 60, color: C.muted }}>No leads yet - click Refresh to scan Reddit</div>}
       {fl.map(t => <div key={t.id} onClick={() => { const defaultTarget: "comment" | "post" = t.replyTo ? "comment" : "post"; setReplyTarget(defaultTarget); setActiveThread(t); setDraftText(t.reply || genReplyFallback(t, ec.tone, ec.length, defaultTarget)); }} style={{ background: C.card, borderRadius: 10, padding: "16px 18px", marginBottom: 8, border: `1px solid ${C.border}`, cursor: "pointer", transition: "border-color 0.15s" }} onMouseEnter={e => (e.currentTarget.style.borderColor = C.accent)} onMouseLeave={e => (e.currentTarget.style.borderColor = C.border)}>
@@ -576,7 +716,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
         <div style={{ display: "flex", gap: 8 }}><input value={newMetric} onChange={e => setNewMetric(e.target.value)} onKeyDown={e => e.key === "Enter" && addM()} placeholder="New metric..." style={{ padding: "8px 14px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 13, width: 160 }} /><button onClick={addM} style={{ background: C.accent, color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", cursor: "pointer", fontWeight: 600, fontSize: 13 }}>+ Add</button></div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, marginBottom: 24 }}>{metrics.map(m => <div key={m.id} style={{ background: C.card, borderRadius: 12, padding: 18, border: `1px solid ${C.border}`, position: "relative" }}><button onClick={() => setMetrics(p => p.filter(x => x.id !== m.id))} style={{ position: "absolute", top: 8, right: 10, background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 12, opacity: 0.3 }} onMouseEnter={e => (e.currentTarget.style.opacity = "1")} onMouseLeave={e => (e.currentTarget.style.opacity = "0.3")}>x</button><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}><span style={{ fontSize: 18 }}>{m.icon}</span><span style={{ fontSize: 13, color: C.muted, fontWeight: 600 }}>{m.name}</span></div><div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}><div><div style={{ fontSize: 26, fontWeight: 800, color: C.text, lineHeight: 1 }}>{m.value}</div><span style={{ fontSize: 13, fontWeight: 600, color: m.trend === "up" ? C.green : C.danger }}>{m.change}</span></div><Spark data={m.data} color={m.trend === "up" ? C.green : C.danger} w={80} h={28} /></div></div>)}</div>
-      <div style={{ background: C.card, borderRadius: 12, padding: 20, border: `1px solid ${C.border}` }}><h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: C.text }}>Pipeline</h3><div style={{ display: "flex", alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>{[{ l: "Monitored", v: threads.length, c: C.accent, i: "M" }, { l: "Drafted", v: threads.filter(t => t.reply).length, c: C.purple, i: "D" }, { l: "Published", v: threads.filter(t => t.status === "posted").length, c: C.green, i: "P" }].map((s, i) => <div key={s.l} style={{ display: "flex", alignItems: "center" }}><div style={{ textAlign: "center", padding: "12px 28px" }}><div style={{ fontSize: 22, marginBottom: 4 }}>{s.i}</div><div style={{ fontSize: 28, fontWeight: 800, color: s.c }}>{s.v}</div><div style={{ fontSize: 12, color: C.muted }}>{s.l}</div></div>{i < 2 && <div style={{ fontSize: 20, color: C.border }}></div>}</div>)}</div></div>
+      <div style={{ background: C.card, borderRadius: 12, padding: 20, border: `1px solid ${C.border}` }}><h3 style={{ margin: "0 0 16px", fontSize: 15, fontWeight: 700, color: C.text }}>Pipeline</h3><div style={{ display: "flex", alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>{[{ l: "Monitored", v: visibleThreads.length, c: C.accent, i: "M" }, { l: "Drafted", v: visibleThreads.filter(t => t.reply).length, c: C.purple, i: "D" }, { l: "Published", v: visibleThreads.filter(t => t.status === "posted").length, c: C.green, i: "P" }].map((s, i) => <div key={s.l} style={{ display: "flex", alignItems: "center" }}><div style={{ textAlign: "center", padding: "12px 28px" }}><div style={{ fontSize: 22, marginBottom: 4 }}>{s.i}</div><div style={{ fontSize: 28, fontWeight: 800, color: s.c }}>{s.v}</div><div style={{ fontSize: 12, color: C.muted }}>{s.l}</div></div>{i < 2 && <div style={{ fontSize: 20, color: C.border }}></div>}</div>)}</div></div>
     </div>);
   };
 

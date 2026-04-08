@@ -6,7 +6,7 @@ export const SUBS_DB = [
   { name: "r/indiehackers", m: "45K" }, { name: "r/Entrepreneur", m: "2.1M" }, { name: "r/microsaas", m: "32K" }, { name: "r/nocode", m: "89K" },
 ];
 
-export const DEF_FA = [{ id: "fa_1", name: "Kedil - Budgeting", icon: "💰", brandKeywords: ["Kedil", "kedil.money"], competitors: ["YNAB", "Mint", "Goodbudget", "Walnut"], subreddits: [{ name: "r/PersonalFinance", members: "19.5M" }, { name: "r/Budgeting", members: "320K" }, { name: "r/IndiaInvestments", members: "450K" }], intentPatterns: ["best", "vs", "alternative", "switching from", "review", "recommend", "looking for"] }];
+export const DEF_FA = [{ id: "fa_1", name: "Kedil - Budgeting", icon: "💰", brandKeywords: ["Kedil", "kedil.money"], competitors: ["YNAB", "Mint", "Goodbudget", "Walnut"], subreddits: [{ name: "r/PersonalFinance", members: "19.5M" }, { name: "r/Budgeting", members: "320K" }, { name: "r/IndiaInvestments", members: "450K" }], intentDescription: "Someone struggling to track monthly salary, household expenses, or EMIs and looking for a better or simpler budgeting method", intentPatterns: ["best", "vs", "alternative", "switching from", "review", "recommend", "looking for"] }];
 
 export const DEF_THREADS: any[] = [];
 

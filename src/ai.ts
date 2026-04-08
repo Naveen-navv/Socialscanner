@@ -60,6 +60,55 @@ ${brandVoice ? `\nBRAND VOICE (MUST FOLLOW — THIS OVERRIDES ALL OTHER RULES):\
   }
 };
 
+export const filterByIntent = async (post: any, intentDescription: string) => {
+  if (!intentDescription?.trim()) return { pass: true, reason: "No intent filter set" };
+
+  const apiKey = (import.meta as any).env.VITE_ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.warn("VITE_ANTHROPIC_API_KEY not set - intent filter passing through.");
+    return { pass: true, reason: "Intent filter unavailable - passed through" };
+  }
+
+  const prompt = `You are filtering Reddit posts for a personal budgeting app.
+
+Target audience intent: "${intentDescription}"
+
+Reddit Post:
+Title: ${post?.title || ""}
+Body: ${post?.body || ""}
+Subreddit: ${post?.sub || ""}
+
+Does this post match the target intent? Answer with ONLY this JSON:
+{"pass": true, "reason": "one line explanation"}`;
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 150,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    const data = await res.json();
+    const text = data.content?.map((b: any) => b.type === "text" ? b.text : "").join("").trim() || "";
+    const parsed = JSON.parse(text.replace(/^```json\s*|\s*```$/g, "").trim());
+    return {
+      pass: Boolean(parsed?.pass),
+      reason: typeof parsed?.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : "No reason provided",
+    };
+  } catch (e) {
+    console.error("Intent filter failed:", e);
+    return { pass: true, reason: "Filter error - passed through" };
+  }
+};
+
 const hashText = (input: string) => {
   let h = 2166136261;
   for (let i = 0; i < input.length; i++) {

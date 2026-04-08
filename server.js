@@ -1,4 +1,5 @@
 import express from "express";
+import "dotenv/config";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { existsSync } from "fs";
@@ -112,64 +113,126 @@ app.put("/api/data", async (req, res) => {
 // ── Reddit OAuth token cache ─────────────────────────────────
 let cachedToken = null;
 let tokenExpiry = 0;
+let lastRedditAuthError = null;
 const REDDIT_RESULT_TTL_MS = 5 * 60 * 1000;
 const SUBREDDIT_EMPTY_TTL_MS = 3 * 60 * 1000;
+const REDDIT_USER_AGENT = "SocialScanner/1.0";
 const redditResultCache = new Map();
 const subredditCooldowns = new Map();
+
+function buildRedditTokenRequest(grantType, extraParams = {}) {
+  const params = new URLSearchParams({ grant_type: grantType });
+  for (const [key, value] of Object.entries(extraParams)) {
+    if (value) params.set(key, value);
+  }
+  return params.toString();
+}
+
+async function readRedditResponse(res) {
+  const contentType = res.headers.get("content-type") || "";
+  try {
+    if (contentType.includes("application/json")) return await res.json();
+    return await res.text();
+  } catch {
+    return null;
+  }
+}
+
+function formatRedditHttpError(status, payload) {
+  if (payload && typeof payload === "object") {
+    const message = payload.message || payload.error_description || payload.reason || payload.error;
+    if (message) return `HTTP ${status}: ${message}`;
+  }
+  if (typeof payload === "string" && payload.trim()) {
+    return `HTTP ${status}: ${payload.trim().slice(0, 160)}`;
+  }
+  return `HTTP ${status}`;
+}
 
 async function getRedditToken() {
   if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
   const clientId = process.env.REDDIT_CLIENT_ID;
   const clientSecret = process.env.REDDIT_CLIENT_SECRET;
-  if (!clientId || !clientSecret) return null;
-  try {
-    const res = await fetch("https://www.reddit.com/api/v1/access_token", {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "SocialScanner/1.0",
-      },
-      body: "grant_type=client_credentials",
-    });
-    const data = await res.json();
-    if (!data.access_token) {
-      console.warn("Reddit token refresh failed:", data);
-      cachedToken = null; tokenExpiry = 0; // clear so retry actually retries
-      return null;
-    }
-    cachedToken = data.access_token;
-    tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
-    return cachedToken;
-  } catch (err) {
-    console.warn("Reddit token fetch error:", err.message);
+  const refreshToken = process.env.REDDIT_REFRESH_TOKEN;
+  if (!clientId || !clientSecret) {
+    lastRedditAuthError = "Missing REDDIT_CLIENT_ID or REDDIT_CLIENT_SECRET";
     return null;
   }
+
+  const attempts = refreshToken
+    ? [
+        { label: "refresh_token", body: buildRedditTokenRequest("refresh_token", { refresh_token: refreshToken }) },
+        { label: "client_credentials", body: buildRedditTokenRequest("client_credentials") },
+      ]
+    : [{ label: "client_credentials", body: buildRedditTokenRequest("client_credentials") }];
+  const errors = [];
+
+  for (const attempt of attempts) {
+    try {
+      const res = await fetch("https://www.reddit.com/api/v1/access_token", {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+          "User-Agent": REDDIT_USER_AGENT,
+        },
+        body: attempt.body,
+      });
+      const data = await readRedditResponse(res);
+      if (!res.ok || !data?.access_token) {
+        errors.push(`${attempt.label}: ${formatRedditHttpError(res.status, data)}`);
+        continue;
+      }
+      cachedToken = data.access_token;
+      tokenExpiry = Date.now() + Math.max(60, (Number(data.expires_in) || 3600) - 60) * 1000;
+      lastRedditAuthError = null;
+      return cachedToken;
+    } catch (err) {
+      errors.push(`${attempt.label}: ${(err && err.message) || "network error"}`);
+    }
+  }
+
+  cachedToken = null;
+  tokenExpiry = 0;
+  lastRedditAuthError = errors.length ? errors.join(" | ") : "Unknown Reddit auth error";
+  console.warn("Reddit token fetch failed:", lastRedditAuthError);
+  return null;
 }
 
 // ── Fetch posts from a subreddit (hot + new) ─────────────────
 async function fetchSubredditPosts(subName, token) {
   const name = subName.replace(/^r\//, "");
-  const headers = { "User-Agent": "SocialScanner/1.0" };
+  const headers = { "User-Agent": REDDIT_USER_AGENT };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const base = token ? "https://oauth.reddit.com" : "https://www.reddit.com";
-  const [hotRes, newRes] = await Promise.allSettled([
-    fetch(`${base}/r/${name}/hot.json?limit=50`, { headers }),
-    fetch(`${base}/r/${name}/new.json?limit=50`, { headers }),
-  ]);
+  const endpoints = [
+    { label: "hot", url: `${base}/r/${name}/hot.json?limit=50&raw_json=1` },
+    { label: "new", url: `${base}/r/${name}/new.json?limit=50&raw_json=1` },
+  ];
+  const results = await Promise.allSettled(endpoints.map((endpoint) => fetch(endpoint.url, { headers })));
   const posts = [];
   const seen = new Set();
-  for (const result of [hotRes, newRes]) {
-    if (result.status !== "fulfilled") continue;
-    const res = result.value;
-    if (!res.ok) continue;
-    let data;
-    try { data = await res.json(); } catch { continue; }
+  const errors = [];
+  const statuses = [];
+  for (let i = 0; i < results.length; i++) {
+    const endpoint = endpoints[i];
+    const result = results[i];
+    if (result.status !== "fulfilled") {
+      errors.push(`${endpoint.label}: ${result.reason?.message || "request failed"}`);
+      continue;
+    }
+    const response = result.value;
+    statuses.push(`${endpoint.label}:${response.status}`);
+    const data = await readRedditResponse(response);
+    if (!response.ok) {
+      errors.push(`${endpoint.label}: ${formatRedditHttpError(response.status, data)}`);
+      continue;
+    }
     for (const child of data?.data?.children || []) {
       if (!seen.has(child.data.id)) { seen.add(child.data.id); posts.push(child.data); }
     }
   }
-  return posts;
+  return { posts, errors, statuses };
 }
 
 function getRedditCacheKey({ subreddits = [], intentPatterns = [], toolTerms = [], searchAll = false }) {
@@ -223,27 +286,27 @@ function setSubredditCooldown(subName, reason = "empty response") {
 
 // ── Search all of Reddit ─────────────────────────────────────
 async function searchReddit(query, token) {
-  const headers = { "User-Agent": "SocialScanner/1.0" };
+  const headers = { "User-Agent": REDDIT_USER_AGENT };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const base = token ? "https://oauth.reddit.com" : "https://www.reddit.com";
-  const url = `${base}/search.json?q=${encodeURIComponent(query)}&sort=relevance&limit=100&type=link&t=week`;
+  const url = `${base}/search.json?q=${encodeURIComponent(query)}&sort=relevance&limit=100&type=link&t=week&raw_json=1`;
   const res = await fetch(url, { headers });
-  if (!res.ok) return [];
-  let data;
-  try { data = await res.json(); } catch { return []; }
+  const data = await readRedditResponse(res);
+  if (!res.ok) throw new Error(formatRedditHttpError(res.status, data));
   return (data?.data?.children || []).map((c) => c.data);
 }
 
 // ── Fetch top comment ────────────────────────────────────────
 async function fetchTopComment(postId, token) {
-  const headers = { "User-Agent": "SocialScanner/1.0" };
+  const headers = { "User-Agent": REDDIT_USER_AGENT };
   const url = token
-    ? `https://oauth.reddit.com/comments/${postId}.json?limit=3&depth=1`
-    : `https://www.reddit.com/comments/${postId}.json?limit=3&depth=1`;
+    ? `https://oauth.reddit.com/comments/${postId}.json?limit=3&depth=1&raw_json=1`
+    : `https://www.reddit.com/comments/${postId}.json?limit=3&depth=1&raw_json=1`;
   if (token) headers["Authorization"] = `Bearer ${token}`;
   try {
     const res = await fetch(url, { headers });
-    const data = await res.json();
+    const data = await readRedditResponse(res);
+    if (!res.ok || !Array.isArray(data)) return null;
     const comments = data?.[1]?.data?.children || [];
     const top = comments.find((c) => c.kind === "t1")?.data;
     if (!top || top.score < 1) return null;
@@ -278,14 +341,24 @@ app.post("/api/reddit", async (req, res) => {
     const threads = [];
     let allPosts = [];
     const fetchErrors = [];
-    if (!hasOAuth) fetchErrors.push("Reddit OAuth token unavailable, falling back to public endpoints");
+    if (!hasOAuth) {
+      fetchErrors.push(
+        lastRedditAuthError
+          ? `Reddit OAuth unavailable (${lastRedditAuthError}), falling back to public endpoints`
+          : "Reddit OAuth token unavailable, falling back to public endpoints"
+      );
+    }
 
     if (searchAll) {
       const queryTerms = intentPatterns.slice(0, 4).map((p) => `"${p}"`);
       const toolQuery = toolTerms.slice(0, 6).join(" OR ");
       const query = `(${queryTerms.join(" OR ")}) ${toolQuery ? `(${toolQuery})` : ""}`.trim();
-      allPosts = await searchReddit(query, token);
-      if (!allPosts.length) fetchErrors.push("Reddit search returned 0 results");
+      try {
+        allPosts = await searchReddit(query, token);
+        if (!allPosts.length) fetchErrors.push("Reddit search returned 0 results");
+      } catch (err) {
+        fetchErrors.push(`Reddit search failed: ${err.message}`);
+      }
     } else {
       for (const sub of subreddits) {
         const subName = sub.name || sub;
@@ -295,14 +368,20 @@ app.post("/api/reddit", async (req, res) => {
           continue;
         }
         try {
-          const posts = await fetchSubredditPosts(subName, token);
+          const { posts, errors, statuses } = await fetchSubredditPosts(subName, token);
           if (posts.length === 0) {
-            if (hasOAuth) setSubredditCooldown(subName, "0 posts from Reddit");
-            fetchErrors.push(`${subName}: 0 posts (${hasOAuth ? "possibly rate-limited" : "public endpoint returned empty"})`);
+            const rateLimited = errors.some((msg) => msg.includes("HTTP 429"));
+            if (hasOAuth && rateLimited) setSubredditCooldown(subName, "rate limited");
+            const detail = errors.length
+              ? errors.join(", ")
+              : `${hasOAuth ? "no posts returned from OAuth API" : "public endpoint returned no posts"}${statuses.length ? ` [${statuses.join(", ")}]` : ""}`;
+            fetchErrors.push(`${subName}: ${detail}`);
+          } else if (errors.length) {
+            fetchErrors.push(`${subName}: partial fetch (${errors.join(", ")})`);
           }
           allPosts.push(...posts.map((p) => ({ ...p, _sub: sub })));
         } catch (err) {
-          if (hasOAuth) setSubredditCooldown(subName, err.message);
+          if (hasOAuth && String(err.message || "").includes("429")) setSubredditCooldown(subName, err.message);
           fetchErrors.push(`${subName}: ${err.message}`);
           console.warn(`Failed to fetch ${subName}:`, err.message);
         }
@@ -366,20 +445,36 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 app.get("/api/test", async (req, res) => {
   const clientId = process.env.REDDIT_CLIENT_ID;
   const clientSecret = process.env.REDDIT_CLIENT_SECRET;
+  const refreshToken = process.env.REDDIT_REFRESH_TOKEN;
   if (!clientId || !clientSecret) return res.json({ ok: false, error: "Missing REDDIT_CLIENT_ID or REDDIT_CLIENT_SECRET" });
   try {
+    const body = refreshToken
+      ? buildRedditTokenRequest("refresh_token", { refresh_token: refreshToken })
+      : buildRedditTokenRequest("client_credentials");
     const r = await fetch("https://www.reddit.com/api/v1/access_token", {
       method: "POST",
       headers: {
         Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
         "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "SocialScanner/1.0",
+        "User-Agent": REDDIT_USER_AGENT,
       },
-      body: "grant_type=client_credentials",
+      body,
     });
-    const data = await r.json();
-    if (data.access_token) return res.json({ ok: true, message: "Reddit credentials valid", tokenPreview: data.access_token.slice(0, 10) + "..." });
-    return res.json({ ok: false, error: "Reddit rejected credentials", detail: data });
+    const data = await readRedditResponse(r);
+    if (r.ok && data?.access_token) {
+      return res.json({
+        ok: true,
+        grantType: refreshToken ? "refresh_token" : "client_credentials",
+        message: "Reddit credentials valid",
+        tokenPreview: data.access_token.slice(0, 10) + "...",
+      });
+    }
+    return res.json({
+      ok: false,
+      grantType: refreshToken ? "refresh_token" : "client_credentials",
+      error: "Reddit rejected credentials",
+      detail: formatRedditHttpError(r.status, data),
+    });
   } catch (e) {
     return res.json({ ok: false, error: e.message });
   }
@@ -394,19 +489,19 @@ app.get("*", (req, res) => {
 
 async function fetchSubredditAbout(subName, token) {
   const name = subName.replace(/^r\//i, "");
-  const headers = { "User-Agent": "SocialScanner/1.0" };
+  const headers = { "User-Agent": REDDIT_USER_AGENT };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const base = token ? "https://oauth.reddit.com" : "https://www.reddit.com";
   const [aboutRes, rulesRes] = await Promise.allSettled([
-    fetch(`${base}/r/${name}/about.json`, { headers }),
-    fetch(`${base}/r/${name}/about/rules.json`, { headers }),
+    fetch(`${base}/r/${name}/about.json?raw_json=1`, { headers }),
+    fetch(`${base}/r/${name}/about/rules.json?raw_json=1`, { headers }),
   ]);
 
   let members = "?";
   let rules = [];
   if (aboutRes.status === "fulfilled" && aboutRes.value.ok) {
     try {
-      const aboutData = await aboutRes.value.json();
+      const aboutData = await readRedditResponse(aboutRes.value);
       const subscribers = aboutData?.data?.subscribers;
       if (typeof subscribers === "number") {
         if (subscribers >= 1000000) members = `${(subscribers / 1000000).toFixed(1)}M`;
@@ -417,7 +512,7 @@ async function fetchSubredditAbout(subName, token) {
   }
   if (rulesRes.status === "fulfilled" && rulesRes.value.ok) {
     try {
-      const rulesData = await rulesRes.value.json();
+      const rulesData = await readRedditResponse(rulesRes.value);
       rules = (rulesData?.rules || []).map((r) => r.short_name || r.description || "").filter(Boolean);
     } catch {}
   }
@@ -480,9 +575,12 @@ app.post("/api/intel", async (req, res) => {
     if (!rawSub) return res.status(400).json({ error: "Missing subreddit" });
     const sub = rawSub.startsWith("r/") ? rawSub : `r/${rawSub}`;
     const token = await getRedditToken();
-    const posts = await fetchSubredditPosts(sub, token);
+    const { posts, errors } = await fetchSubredditPosts(sub, token);
     const meta = await fetchSubredditAbout(sub, token);
-    if (!posts.length) return res.status(502).json({ error: `No recent posts fetched for ${sub}. Try again in a moment.` });
+    if (!posts.length) {
+      const detail = errors.length ? ` (${errors.join(", ")})` : "";
+      return res.status(502).json({ error: `No recent posts fetched for ${sub}. Try again in a moment.${detail}` });
+    }
     const profile = buildIntelProfile(posts, meta);
     res.json({ profile: { ...profile, sub } });
   } catch (err) {

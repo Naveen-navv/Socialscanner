@@ -184,6 +184,13 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     return value;
   };
 
+  const getThreadStatsText = (thread: any, scoreLabel = "pts") => {
+    const parts = [];
+    if (typeof thread?.score === "number") parts.push(`${thread.score} ${scoreLabel}`);
+    if (typeof thread?.comments === "number") parts.push(`${thread.comments} comments`);
+    return parts.join(" | ");
+  };
+
   const normalizedToolTerms = useMemo(
     () => toolTerms.map((term) => term.toLowerCase().trim()).filter(Boolean),
     [toolTerms]
@@ -610,7 +617,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
             <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{t.body}</div>
           </div>
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
-            <div style={{ fontSize: 12, color: C.muted }}> {t.score} pts | {t.comments} comments</div>
+            {getThreadStatsText(t) && <div style={{ fontSize: 12, color: C.muted }}>{getThreadStatsText(t)}</div>}
             <span style={{ fontSize: 11, color: C.muted }}>{t.author}</span>
             {t.performance && <div style={{ fontSize: 11, color: C.green }}>{t.performance.upvotes} upvotes | {t.performance.views.toLocaleString()} views</div>}
           </div>
@@ -624,6 +631,8 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     const copyR = () => { navigator.clipboard.writeText(draftText).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }).catch(() => {}); };
     const markP = () => { const perf = { upvotes: 0, replies: 0, views: 0 }; setThreads(p => p.map(x => x.id === t.id ? { ...x, reply: draftText, status: "posted", performance: perf } : x)); setActiveThread({ ...t, reply: draftText, status: "posted", performance: perf }); };
     const openReddit = () => { if (t.url) window.open(t.url, "_blank", "noopener,noreferrer"); };
+    const threadStatsText = getThreadStatsText(t);
+    const replyToStatsText = getThreadStatsText(t, "upvotes");
     const regen = async (tone?: string, len?: string) => {
       const useTone = tone || ec.tone; const useLen = len || ec.length;
       setAiLoading(true);
@@ -643,7 +652,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       <div style={{ background: C.card, borderRadius: 12, padding: "14px 20px", marginBottom: 16, border: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0 }}>
           <button onClick={() => setActiveThread(null)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 14, flexShrink: 0 }}>{"<-"}</button>
-          <div style={{ minWidth: 0 }}><div style={{ fontSize: 15, fontWeight: 700, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div><div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}><Badge color={C.blue}>{t.sub}</Badge><span style={{ fontSize: 11, color: C.muted }}>{t.author} | {t.score} pts | {t.comments} comments | {t.time}</span></div></div>
+          <div style={{ minWidth: 0 }}><div style={{ fontSize: 15, fontWeight: 700, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div><div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}><Badge color={C.blue}>{t.sub}</Badge><span style={{ fontSize: 11, color: C.muted }}>{[t.author, threadStatsText, t.time].filter(Boolean).join(" | ")}</span></div></div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>{isP ? <Badge color={C.green}> Posted</Badge> : <Badge color={C.warn}>Draft</Badge>}<button onClick={openReddit} disabled={!t.url} style={{ background: "transparent", color: t.url ? C.accent : C.muted, border: `1px solid ${t.url ? C.accent : C.border}`, borderRadius: 8, padding: "6px 14px", cursor: t.url ? "pointer" : "not-allowed", fontSize: 12, opacity: t.url ? 1 : 0.6 }}> View on Reddit</button></div>
       </div>
@@ -655,7 +664,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
               <button onClick={() => switchReplyTarget("comment")} style={{ flex: 1, padding: "7px 0", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600, background: replyTarget === "comment" ? C.accent : "transparent", color: replyTarget === "comment" ? "#fff" : C.muted }}>Comment</button>
             </div>}
             <div style={{ background: C.card, borderRadius: 10, padding: 16, border: `1px solid ${replyTarget === "comment" && t.replyTo ? C.accent : C.border}`, borderLeft: `3px solid ${C.accent}` }}>
-              {replyTarget === "comment" && t.replyTo ? (<><p style={{ margin: "0 0 8px", fontSize: 14, color: C.text, lineHeight: 1.6, fontStyle: "italic" }}>"{t.replyTo.text}"</p><div style={{ fontSize: 12, color: C.muted }}> {t.replyTo.upvotes} upvotes | {t.replyTo.author}</div></>) : (<><p style={{ margin: "0 0 8px", fontSize: 14, color: C.text, lineHeight: 1.6 }}>Replying directly to original post by {t.author}</p><div style={{ fontSize: 12, color: C.muted }}> {t.score} upvotes   {t.comments} comments</div></>)}
+              {replyTarget === "comment" && t.replyTo ? (<><p style={{ margin: "0 0 8px", fontSize: 14, color: C.text, lineHeight: 1.6, fontStyle: "italic" }}>"{t.replyTo.text}"</p><div style={{ fontSize: 12, color: C.muted }}> {t.replyTo.upvotes} upvotes | {t.replyTo.author}</div></>) : (<><p style={{ margin: "0 0 8px", fontSize: 14, color: C.text, lineHeight: 1.6 }}>Replying directly to original post by {t.author}</p><div style={{ fontSize: 12, color: C.muted }}>{replyToStatsText || "Live Reddit stats unavailable"}</div></>)}
             </div>
           </div>
           <div><div style={{ fontSize: 10, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>Original Thread</div>

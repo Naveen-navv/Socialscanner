@@ -321,8 +321,9 @@ function parseRedditFeedPosts(feedText, subName) {
       created_utc: createdUtc,
       author,
       subreddit: subName.replace(/^r\//i, ""),
-      score: 0,
-      num_comments: 0,
+      score: null,
+      num_comments: null,
+      _source: "rss",
     };
   }).filter((post) => post.id && post.title);
 }
@@ -457,16 +458,29 @@ async function searchReddit(query, token) {
 }
 
 // ── Fetch top comment ────────────────────────────────────────
-async function fetchTopComment(postId, token) {
+function extractThreadListingPost(data) {
+  return data?.[0]?.data?.children?.find((item) => item?.kind === "t3")?.data || null;
+}
+
+function extractThreadListingReply(data) {
+  const comments = data?.[1]?.data?.children || [];
+  const top = comments.find((c) => c?.kind === "t1")?.data;
+  if (!top || top.score < 1) return null;
+  return { text: top.body?.slice(0, 250) || "", upvotes: top.score || 0, author: `u/${top.author}` };
+}
+
+async function fetchPostSnapshot(postId, token) {
   const path = `/comments/${postId}.json?limit=3&depth=1&raw_json=1`;
   try {
     const { data } = await fetchRedditJsonWithFallback(path, token);
-    if (!Array.isArray(data)) return null;
-    const comments = data?.[1]?.data?.children || [];
-    const top = comments.find((c) => c.kind === "t1")?.data;
-    if (!top || top.score < 1) return null;
-    return { text: top.body?.slice(0, 250) || "", upvotes: top.score || 0, author: `u/${top.author}` };
-  } catch { return null; }
+    if (!Array.isArray(data)) return { post: null, replyTo: null };
+    return {
+      post: extractThreadListingPost(data),
+      replyTo: extractThreadListingReply(data),
+    };
+  } catch {
+    return { post: null, replyTo: null };
+  }
 }
 
 function timeAgo(utc) {
@@ -555,29 +569,31 @@ app.post("/api/reddit", async (req, res) => {
       if (!isAboutTool) continue;
       toolMatched++;
 
-      // Only fetch top comment for first 15 matches to avoid rate limiting
-      const replyTo = threads.length < 15 ? await fetchTopComment(post.id, token) : null;
-      const subName = searchAll ? `r/${post.subreddit}` : (post._sub?.name || post._sub || `r/${post.subreddit}`);
-      const subMembers = searchAll ? "?" : (post._sub?.members || "?");
+      const needsSnapshot = post._source === "rss" || threads.length < 15;
+      const snapshot = needsSnapshot ? await fetchPostSnapshot(post.id, token) : { post: null, replyTo: null };
+      const hydratedPost = snapshot.post ? { ...post, ...snapshot.post } : post;
+      const replyTo = threads.length < 15 ? snapshot.replyTo : null;
+      const subName = searchAll ? `r/${hydratedPost.subreddit}` : (hydratedPost._sub?.name || hydratedPost._sub || `r/${hydratedPost.subreddit}`);
+      const subMembers = searchAll ? "?" : (hydratedPost._sub?.members || "?");
 
       threads.push({
-        id: post.id,
-        title: post.title,
+        id: hydratedPost.id,
+        title: hydratedPost.title,
         sub: subName,
         subMembers,
-        score: post.score,
-        comments: post.num_comments,
-        time: timeAgo(post.created_utc),
-        intent: post.score > 500 ? "High" : "Medium",
+        score: Number.isFinite(hydratedPost.score) ? hydratedPost.score : null,
+        comments: Number.isFinite(hydratedPost.num_comments) ? hydratedPost.num_comments : null,
+        time: timeAgo(hydratedPost.created_utc),
+        intent: (hydratedPost.score || 0) > 500 ? "High" : "Medium",
         matchedPattern,
-        author: `u/${post.author}`,
+        author: `u/${hydratedPost.author}`,
         authorKarma: "?",
-        body: post.selftext?.trim() || post.title,
+        body: hydratedPost.selftext?.trim() || hydratedPost.title,
         replyTo,
         reply: null,
         status: "new",
         performance: null,
-        url: `https://reddit.com${post.permalink}`,
+        url: `https://reddit.com${hydratedPost.permalink || post.permalink || `/comments/${hydratedPost.id}`}`,
       });
     }
 

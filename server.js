@@ -116,9 +116,29 @@ let tokenExpiry = 0;
 let lastRedditAuthError = null;
 const REDDIT_RESULT_TTL_MS = 5 * 60 * 1000;
 const SUBREDDIT_EMPTY_TTL_MS = 3 * 60 * 1000;
-const REDDIT_USER_AGENT = "SocialScanner/1.0";
+const REDDIT_USER_AGENT = "SocialScanner/1.0 (+https://github.com/Naveen-navv/Socialscanner)";
+const REDDIT_ACCEPT_HEADER = "application/json, text/plain, */*";
+const REDDIT_PUBLIC_BASES = [
+  { label: "www", base: "https://www.reddit.com" },
+  { label: "old", base: "https://old.reddit.com" },
+];
 const redditResultCache = new Map();
 const subredditCooldowns = new Map();
+
+function getRedditRequestTargets(token) {
+  return token
+    ? [{ label: "oauth", base: "https://oauth.reddit.com" }]
+    : REDDIT_PUBLIC_BASES;
+}
+
+function buildRedditHeaders(token) {
+  const headers = {
+    "User-Agent": REDDIT_USER_AGENT,
+    "Accept": REDDIT_ACCEPT_HEADER,
+  };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
 
 function buildRedditTokenRequest(grantType, extraParams = {}) {
   const params = new URLSearchParams({ grant_type: grantType });
@@ -140,11 +160,16 @@ async function readRedditResponse(res) {
 
 function formatRedditHttpError(status, payload) {
   if (payload && typeof payload === "object") {
+    if (payload.reason === "private") return `HTTP ${status}: private or restricted subreddit`;
     const message = payload.message || payload.error_description || payload.reason || payload.error;
     if (message) return `HTTP ${status}: ${message}`;
   }
   if (typeof payload === "string" && payload.trim()) {
-    return `HTTP ${status}: ${payload.trim().slice(0, 160)}`;
+    if (/<(?:!doctype|html|body|head|style)\b/i.test(payload)) {
+      return `HTTP ${status}: blocked by Reddit public web endpoint`;
+    }
+    const normalized = payload.replace(/\s+/g, " ").trim();
+    return `HTTP ${status}: ${normalized.slice(0, 160)}`;
   }
   return `HTTP ${status}`;
 }
@@ -200,39 +225,79 @@ async function getRedditToken() {
 }
 
 // ── Fetch posts from a subreddit (hot + new) ─────────────────
-async function fetchSubredditPosts(subName, token) {
-  const name = subName.replace(/^r\//, "");
-  const headers = { "User-Agent": REDDIT_USER_AGENT };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  const base = token ? "https://oauth.reddit.com" : "https://www.reddit.com";
-  const endpoints = [
-    { label: "hot", url: `${base}/r/${name}/hot.json?limit=50&raw_json=1` },
-    { label: "new", url: `${base}/r/${name}/new.json?limit=50&raw_json=1` },
-  ];
-  const results = await Promise.allSettled(endpoints.map((endpoint) => fetch(endpoint.url, { headers })));
+async function fetchRedditListingFromBase(target, endpoints, token) {
+  const headers = buildRedditHeaders(token);
+  const results = await Promise.allSettled(
+    endpoints.map((endpoint) => fetch(`${target.base}${endpoint.path}`, { headers }))
+  );
   const posts = [];
   const seen = new Set();
   const errors = [];
   const statuses = [];
+
   for (let i = 0; i < results.length; i++) {
     const endpoint = endpoints[i];
     const result = results[i];
     if (result.status !== "fulfilled") {
-      errors.push(`${endpoint.label}: ${result.reason?.message || "request failed"}`);
+      errors.push(`${target.label}:${endpoint.label}: ${result.reason?.message || "request failed"}`);
       continue;
     }
+
     const response = result.value;
-    statuses.push(`${endpoint.label}:${response.status}`);
+    statuses.push(`${target.label}:${endpoint.label}:${response.status}`);
     const data = await readRedditResponse(response);
     if (!response.ok) {
-      errors.push(`${endpoint.label}: ${formatRedditHttpError(response.status, data)}`);
+      errors.push(`${target.label}:${endpoint.label}: ${formatRedditHttpError(response.status, data)}`);
       continue;
     }
+
     for (const child of data?.data?.children || []) {
-      if (!seen.has(child.data.id)) { seen.add(child.data.id); posts.push(child.data); }
+      if (!child?.data?.id || seen.has(child.data.id)) continue;
+      seen.add(child.data.id);
+      posts.push(child.data);
     }
   }
+
   return { posts, errors, statuses };
+}
+
+async function fetchSubredditPosts(subName, token) {
+  const name = subName.replace(/^r\//, "");
+  const endpoints = [
+    { label: "hot", path: `/r/${name}/hot.json?limit=50&raw_json=1` },
+    { label: "new", path: `/r/${name}/new.json?limit=50&raw_json=1` },
+  ];
+  const targets = getRedditRequestTargets(token);
+  const fallbackErrors = [];
+  const fallbackStatuses = [];
+
+  for (const target of targets) {
+    const result = await fetchRedditListingFromBase(target, endpoints, token);
+    if (result.posts.length > 0) return result;
+    fallbackErrors.push(...result.errors);
+    fallbackStatuses.push(...result.statuses);
+  }
+
+  return { posts: [], errors: fallbackErrors, statuses: fallbackStatuses };
+}
+
+async function fetchRedditJsonWithFallback(path, token) {
+  const targets = getRedditRequestTargets(token);
+  const headers = buildRedditHeaders(token);
+  const errors = [];
+
+  for (const target of targets) {
+    try {
+      const res = await fetch(`${target.base}${path}`, { headers });
+      const data = await readRedditResponse(res);
+      if (res.ok) return { data, target, status: res.status };
+      errors.push(`${target.label}: ${formatRedditHttpError(res.status, data)}`);
+    } catch (err) {
+      errors.push(`${target.label}: ${(err && err.message) || "request failed"}`);
+    }
+  }
+
+  throw new Error(errors.join(", "));
 }
 
 function getRedditCacheKey({ subreddits = [], intentPatterns = [], toolTerms = [], searchAll = false }) {
@@ -286,27 +351,17 @@ function setSubredditCooldown(subName, reason = "empty response") {
 
 // ── Search all of Reddit ─────────────────────────────────────
 async function searchReddit(query, token) {
-  const headers = { "User-Agent": REDDIT_USER_AGENT };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  const base = token ? "https://oauth.reddit.com" : "https://www.reddit.com";
-  const url = `${base}/search.json?q=${encodeURIComponent(query)}&sort=relevance&limit=100&type=link&t=week&raw_json=1`;
-  const res = await fetch(url, { headers });
-  const data = await readRedditResponse(res);
-  if (!res.ok) throw new Error(formatRedditHttpError(res.status, data));
+  const path = `/search.json?q=${encodeURIComponent(query)}&sort=relevance&limit=100&type=link&t=week&raw_json=1`;
+  const { data } = await fetchRedditJsonWithFallback(path, token);
   return (data?.data?.children || []).map((c) => c.data);
 }
 
 // ── Fetch top comment ────────────────────────────────────────
 async function fetchTopComment(postId, token) {
-  const headers = { "User-Agent": REDDIT_USER_AGENT };
-  const url = token
-    ? `https://oauth.reddit.com/comments/${postId}.json?limit=3&depth=1&raw_json=1`
-    : `https://www.reddit.com/comments/${postId}.json?limit=3&depth=1&raw_json=1`;
-  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const path = `/comments/${postId}.json?limit=3&depth=1&raw_json=1`;
   try {
-    const res = await fetch(url, { headers });
-    const data = await readRedditResponse(res);
-    if (!res.ok || !Array.isArray(data)) return null;
+    const { data } = await fetchRedditJsonWithFallback(path, token);
+    if (!Array.isArray(data)) return null;
     const comments = data?.[1]?.data?.children || [];
     const top = comments.find((c) => c.kind === "t1")?.data;
     if (!top || top.score < 1) return null;
@@ -489,19 +544,16 @@ app.get("*", (req, res) => {
 
 async function fetchSubredditAbout(subName, token) {
   const name = subName.replace(/^r\//i, "");
-  const headers = { "User-Agent": REDDIT_USER_AGENT };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  const base = token ? "https://oauth.reddit.com" : "https://www.reddit.com";
   const [aboutRes, rulesRes] = await Promise.allSettled([
-    fetch(`${base}/r/${name}/about.json?raw_json=1`, { headers }),
-    fetch(`${base}/r/${name}/about/rules.json?raw_json=1`, { headers }),
+    fetchRedditJsonWithFallback(`/r/${name}/about.json?raw_json=1`, token),
+    fetchRedditJsonWithFallback(`/r/${name}/about/rules.json?raw_json=1`, token),
   ]);
 
   let members = "?";
   let rules = [];
-  if (aboutRes.status === "fulfilled" && aboutRes.value.ok) {
+  if (aboutRes.status === "fulfilled") {
     try {
-      const aboutData = await readRedditResponse(aboutRes.value);
+      const aboutData = aboutRes.value.data;
       const subscribers = aboutData?.data?.subscribers;
       if (typeof subscribers === "number") {
         if (subscribers >= 1000000) members = `${(subscribers / 1000000).toFixed(1)}M`;
@@ -510,9 +562,9 @@ async function fetchSubredditAbout(subName, token) {
       }
     } catch {}
   }
-  if (rulesRes.status === "fulfilled" && rulesRes.value.ok) {
+  if (rulesRes.status === "fulfilled") {
     try {
-      const rulesData = await readRedditResponse(rulesRes.value);
+      const rulesData = rulesRes.value.data;
       rules = (rulesData?.rules || []).map((r) => r.short_name || r.description || "").filter(Boolean);
     } catch {}
   }

@@ -221,7 +221,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     setTestLoading(false);
   }, [selFA]);
 
-  const focusAreaMatchesThread = (focus: any, thread: any, useSearchAll = false) => {
+  function focusAreaMatchesThread(focus: any, thread: any, useSearchAll = false) {
     const subName = String(thread?.sub || "").toLowerCase().trim();
     const text = `${thread?.title || ""} ${thread?.body || ""}`.toLowerCase();
     const matchedPattern = String(thread?.matchedPattern || "").toLowerCase().trim();
@@ -231,7 +231,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       return normalizedPattern && (matchedPattern === normalizedPattern || text.includes(normalizedPattern));
     });
     return subredditMatch && patternMatch;
-  };
+  }
 
   const applyIntentFilters = async (incomingThreads: any[], currentFa: any[], useSearchAll = false) => {
     const filteredThreads = [];

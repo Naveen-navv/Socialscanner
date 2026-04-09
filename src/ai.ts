@@ -60,13 +60,108 @@ ${brandVoice ? `\nBRAND VOICE (MUST FOLLOW — THIS OVERRIDES ALL OTHER RULES):\
   }
 };
 
-export const filterByIntent = async (post: any, intentDescription: string) => {
-  if (!intentDescription?.trim()) return { pass: true, reason: "No intent filter set" };
+type IntentFilterOptions = {
+  allowPassThroughOnError?: boolean;
+};
+
+type IntentFilterResult = {
+  pass: boolean;
+  reason: string;
+  matchedIntent: string;
+  matchedKeywords: string[];
+  status: "matched" | "filtered" | "error" | "passed_through";
+};
+
+const INTENT_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "how", "i",
+  "if", "in", "into", "is", "it", "me", "my", "of", "on", "or", "our", "so", "someone",
+  "that", "the", "their", "them", "they", "this", "to", "trying", "want", "who", "with",
+]);
+
+const summarizeIntent = (intentDescription: string) => {
+  const clean = String(intentDescription || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  const firstSentence = clean.split(/[.!?\n]/)[0]?.trim() || clean;
+  return firstSentence.length <= 140 ? firstSentence : `${firstSentence.slice(0, 137).trim()}...`;
+};
+
+const normalizeKeyword = (value: string) => String(value || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+
+const extractIntentKeywords = (intentDescription: string) => {
+  const phraseMatches = Array.from(String(intentDescription || "").matchAll(/"([^"]+)"/g))
+    .map((match) => normalizeKeyword(match[1]))
+    .filter(Boolean);
+  const wordMatches = normalizeKeyword(intentDescription)
+    .split(" ")
+    .filter((word) => word.length >= 4 && !INTENT_STOP_WORDS.has(word));
+  return Array.from(new Set([...phraseMatches, ...wordMatches]));
+};
+
+const inferMatchedKeywords = (post: any, intentDescription: string) => {
+  const text = normalizeKeyword(`${post?.title || ""} ${post?.body || ""}`);
+  if (!text) return [];
+  return extractIntentKeywords(intentDescription)
+    .filter((keyword) => keyword && text.includes(keyword))
+    .slice(0, 6);
+};
+
+const extractJsonPayload = (text: string) => {
+  const cleaned = String(text || "").replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
+  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+  return (jsonMatch?.[0] || cleaned).trim();
+};
+
+const buildIntentFilterResult = (
+  parsed: any,
+  post: any,
+  intentDescription: string,
+): IntentFilterResult => {
+  const pass = Boolean(parsed?.pass);
+  const matchedIntent = typeof parsed?.matchedIntent === "string" && parsed.matchedIntent.trim()
+    ? parsed.matchedIntent.trim()
+    : (pass ? summarizeIntent(intentDescription) : "");
+  const inferredKeywords = inferMatchedKeywords(post, intentDescription);
+  const matchedKeywords = Array.isArray(parsed?.matchedKeywords)
+    ? Array.from(new Set(parsed.matchedKeywords.map((keyword: any) => String(keyword || "").trim()).filter(Boolean))).slice(0, 6)
+    : inferredKeywords;
+  const reason = typeof parsed?.reason === "string" && parsed.reason.trim()
+    ? parsed.reason.trim()
+    : (pass
+      ? "Matched the target intent."
+      : "Did not match the target intent.");
+  return {
+    pass,
+    reason,
+    matchedIntent,
+    matchedKeywords: matchedKeywords.length ? matchedKeywords : inferredKeywords,
+    status: pass ? "matched" : "filtered",
+  };
+};
+
+export const filterByIntent = async (post: any, intentDescription: string, options: IntentFilterOptions = {}): Promise<IntentFilterResult> => {
+  const allowPassThroughOnError = options.allowPassThroughOnError ?? true;
+  if (!intentDescription?.trim()) {
+    return {
+      pass: true,
+      reason: "No intent filter set",
+      matchedIntent: "",
+      matchedKeywords: [],
+      status: "matched",
+    };
+  }
 
   const apiKey = (import.meta as any).env.VITE_ANTHROPIC_API_KEY;
   if (!apiKey) {
-    console.warn("VITE_ANTHROPIC_API_KEY not set - intent filter passing through.");
-    return { pass: true, reason: "Intent filter unavailable - passed through" };
+    console.warn("VITE_ANTHROPIC_API_KEY not set - intent filter unavailable.");
+    return {
+      pass: allowPassThroughOnError,
+      reason: allowPassThroughOnError
+        ? "Intent filter unavailable, so this post was passed through."
+        : "Intent filter unavailable. Add VITE_ANTHROPIC_API_KEY to test this filter.",
+      matchedIntent: "",
+      matchedKeywords: [],
+      status: allowPassThroughOnError ? "passed_through" : "error",
+    };
   }
 
   const prompt = `You are filtering Reddit posts for a personal budgeting app.
@@ -78,8 +173,15 @@ Title: ${post?.title || ""}
 Body: ${post?.body || ""}
 Subreddit: ${post?.sub || ""}
 
-Does this post match the target intent? Answer with ONLY this JSON:
-{"pass": true, "reason": "one line explanation"}`;
+Decide whether the Reddit post matches the target audience intent.
+Return ONLY valid JSON in this exact shape:
+{"pass": true, "reason": "one sentence", "matchedIntent": "short phrase from the target intent that matched", "matchedKeywords": ["keyword 1", "keyword 2"]}
+
+Rules:
+- "reason" must explain why it matches or does not match.
+- "matchedIntent" must be empty when pass is false.
+- "matchedKeywords" must contain the relevant words or phrases from the Reddit post that drove the decision.
+- Do not include markdown fences or extra text.`;
 
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -92,20 +194,25 @@ Does this post match the target intent? Answer with ONLY this JSON:
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
-        max_tokens: 150,
+        max_tokens: 220,
         messages: [{ role: "user", content: prompt }],
       }),
     });
     const data = await res.json();
     const text = data.content?.map((b: any) => b.type === "text" ? b.text : "").join("").trim() || "";
-    const parsed = JSON.parse(text.replace(/^```json\s*|\s*```$/g, "").trim());
-    return {
-      pass: Boolean(parsed?.pass),
-      reason: typeof parsed?.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : "No reason provided",
-    };
+    const parsed = JSON.parse(extractJsonPayload(text));
+    return buildIntentFilterResult(parsed, post, intentDescription);
   } catch (e) {
     console.error("Intent filter failed:", e);
-    return { pass: true, reason: "Filter error - passed through" };
+    return {
+      pass: allowPassThroughOnError,
+      reason: allowPassThroughOnError
+        ? "Intent filter could not validate this post, so it was passed through to avoid missing a lead."
+        : "Intent filter could not evaluate this post. Try again and check the AI response format.",
+      matchedIntent: "",
+      matchedKeywords: [],
+      status: allowPassThroughOnError ? "passed_through" : "error",
+    };
   }
 };
 

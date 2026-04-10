@@ -100,6 +100,17 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     intentDescription: focus?.intentDescription || "",
   });
 
+  const normalizeSubredditName = (rawSub: string) => {
+    const trimmed = String(rawSub || "").trim();
+    if (!trimmed) return "";
+    return trimmed.startsWith("r/") ? trimmed : `r/${trimmed}`;
+  };
+
+  const isLiveIntelEntry = (entry: any) => (
+    String(entry?.source || "").toLowerCase() === "live" ||
+    /^Analyzed at /i.test(String(entry?.lastScanned || ""))
+  );
+
   const quickScanIntel = async (id: string, sub: string) => {
     setIntel((prev) => prev.map((x) => x.id === id ? { ...x, scanStatus: "scanning", scanMessage: "Analyzing subreddit patterns..." } : x));
     try {
@@ -116,7 +127,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
       const profile = data?.profile;
       if (!profile) throw new Error("Analysis service returned no profile");
-      setIntel((prev) => prev.map((x) => x.id === id ? { ...x, ...profile } : x));
+      setIntel((prev) => prev.map((x) => x.id === id ? { ...x, ...profile, source: "live" } : x));
     } catch (err: any) {
       setIntel((prev) => prev.map((x) => x.id === id ? {
         ...x,
@@ -129,15 +140,15 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     }
   };
 
-  const addIntelSubreddit = (rawSub: string) => {
-    if (!rawSub.trim()) return;
-    const sub = rawSub.trim().startsWith("r/") ? rawSub.trim() : `r/${rawSub.trim()}`;
+  const addIntelSubreddit = (rawSub: string, members = "?") => {
+    const sub = normalizeSubredditName(rawSub);
+    if (!sub) return;
     if (intel.find((s) => s.sub.toLowerCase() === sub.toLowerCase())) return;
     const id = `si_${Date.now()}`;
     setIntel((prev) => [...prev, {
       id,
       sub,
-      members: "?",
+      members,
       lastScanned: "Queued",
       confidence: 0,
       rules: ["Preparing scan..."],
@@ -152,6 +163,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       learningLog: [{ date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" }), entry: "Quick scan started" }],
       scanStatus: "scanning",
       scanMessage: "Starting analysis...",
+      source: "pending",
     }]);
     setNewIntelSub("");
     void quickScanIntel(id, sub);
@@ -205,6 +217,11 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     const matchingFocusAreas = fa.filter((focus) => focusAreaMatchesThread(focus, thread, searchAll));
     if (!matchingFocusAreas.length) return false;
 
+    const storedFocusAreaId = String(thread?.focusAreaId || "");
+    if (storedFocusAreaId) {
+      return matchingFocusAreas.some((focus) => String(focus.id || "") === storedFocusAreaId);
+    }
+
     const storedIntentDescription = String(thread?.intentFilterDescription || "");
     if (!storedIntentDescription) return true;
 
@@ -246,11 +263,16 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       const matchingFocusAreas = currentFa.filter((focus) => focusAreaMatchesThread(focus, thread, useSearchAll));
       if (!matchingFocusAreas.length) continue;
 
-      let passingIntentResult: { reason: string; intentDescription: string } | null = null;
+      let passingIntentResult: { reason: string; intentDescription: string; focusAreaId: string; focusAreaName: string } | null = null;
       for (const focus of matchingFocusAreas) {
         const result = await filterByIntent(thread, focus.intentDescription || "");
         if (result.pass) {
-          passingIntentResult = { reason: result.reason, intentDescription: focus.intentDescription || "" };
+          passingIntentResult = {
+            reason: result.reason,
+            intentDescription: focus.intentDescription || "",
+            focusAreaId: String(focus.id || ""),
+            focusAreaName: String(focus.name || ""),
+          };
           break;
         }
       }
@@ -260,6 +282,8 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
         ...thread,
         intentFilterReason: passingIntentResult.reason,
         intentFilterDescription: passingIntentResult.intentDescription,
+        focusAreaId: passingIntentResult.focusAreaId,
+        focusAreaName: passingIntentResult.focusAreaName,
       });
     }
     return filteredThreads;
@@ -309,6 +333,8 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
                   url: incoming.url,
                   intentFilterReason: incoming.intentFilterReason,
                   intentFilterDescription: incoming.intentFilterDescription,
+                  focusAreaId: incoming.focusAreaId,
+                  focusAreaName: incoming.focusAreaName,
                 }
               : incoming
           );
@@ -490,6 +516,51 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     return () => { if (timer.current) clearTimeout(timer.current); };
   }, [fa, threads, ec, metrics, bm, intel, toolTerms, searchAll, dataLoaded]);
 
+  useEffect(() => {
+    if (!dataLoaded) return;
+
+    const monitorSubs = new Map<string, string>();
+    for (const focus of fa) {
+      for (const sub of focus?.subreddits || []) {
+        const name = normalizeSubredditName(sub?.name || sub);
+        if (!name) continue;
+        const members = String(sub?.members || "?");
+        if (!monitorSubs.has(name)) monitorSubs.set(name, members);
+      }
+    }
+
+    if (!monitorSubs.size) return;
+
+    const existingBySub = new Map(
+      intel.map((entry) => [normalizeSubredditName(entry?.sub || ""), entry] as const).filter(([name]) => !!name)
+    );
+
+    setIntel((prev) => {
+      let changed = false;
+      const next = prev.map((entry) => {
+        const subName = normalizeSubredditName(entry?.sub || "");
+        const monitorMembers = monitorSubs.get(subName);
+        if (!monitorMembers || monitorMembers === "?" || entry?.members === monitorMembers) return entry;
+        if (entry?.members && entry.members !== "?") return entry;
+        changed = true;
+        return { ...entry, members: monitorMembers };
+      });
+      return changed ? next : prev;
+    });
+
+    for (const [subName, members] of monitorSubs.entries()) {
+      const existing = existingBySub.get(subName);
+      if (!existing) {
+        addIntelSubreddit(subName, members);
+        continue;
+      }
+      if (existing.scanStatus === "scanning" || existing.scanStatus === "failed") continue;
+      if (!isLiveIntelEntry(existing)) {
+        void quickScanIntel(existing.id, subName);
+      }
+    }
+  }, [fa, intel, dataLoaded]);
+
   const updateFA = (id: string, u: any) => setFa(p => p.map(f => f.id === id ? { ...f, ...u } : f));
 
   const validate = (text: string, subName: string) => {
@@ -561,7 +632,11 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
               if (!testPostText.trim() || !f.intentDescription?.trim()) return;
               setTestLoading(true);
               setTestResult(null);
-              const result = await filterByIntent({ title: testPostText, body: "", sub: "test" }, f.intentDescription);
+              const result = await filterByIntent(
+                { title: testPostText, body: "", sub: "test" },
+                f.intentDescription,
+                { allowPassThroughOnError: false },
+              );
               setTestResult(result);
               setTestLoading(false);
             }}
@@ -571,11 +646,21 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
             {testLoading ? "Checking..." : "Test Intent Filter"}
           </button>
           {testResult && (
-            <div style={{ padding: "12px 16px", borderRadius: 8, background: testResult.pass ? `${C.green}15` : `${C.danger}15`, border: `1px solid ${testResult.pass ? C.green : C.danger}` }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: testResult.pass ? C.green : C.danger, marginBottom: 4 }}>
-                {testResult.pass ? "Match - goes to Leads" : "No match - filtered out"}
+            <div style={{ padding: "12px 16px", borderRadius: 8, background: testResult.status === "error" ? `${C.orange}15` : testResult.pass ? `${C.green}15` : `${C.danger}15`, border: `1px solid ${testResult.status === "error" ? C.orange : testResult.pass ? C.green : C.danger}` }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: testResult.status === "error" ? C.orange : testResult.pass ? C.green : C.danger, marginBottom: 4 }}>
+                {testResult.status === "error" ? "Couldn't test filter" : testResult.pass ? "Match - goes to Leads" : "No match - filtered out"}
               </div>
               <div style={{ fontSize: 13, color: C.muted }}>{testResult.reason}</div>
+              {!!testResult.matchedIntent && (
+                <div style={{ marginTop: 10, fontSize: 12, color: C.text }}>
+                  <span style={{ fontWeight: 700 }}>Matched intent:</span> {testResult.matchedIntent}
+                </div>
+              )}
+              {!!testResult.matchedKeywords?.length && (
+                <div style={{ marginTop: 8, fontSize: 12, color: C.text }}>
+                  <span style={{ fontWeight: 700 }}>Matched keywords:</span> {testResult.matchedKeywords.join(", ")}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -613,6 +698,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 200 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}><Badge color={C.blue}>{t.sub}</Badge><Badge color={t.intent === "High" ? C.green : C.warn}>{t.intent}</Badge><Badge color={C.purple}>{t.matchedPattern}</Badge>{t.status === "posted" && <Badge color={C.green}> Posted</Badge>}<span style={{ fontSize: 11, color: C.muted }}>{t.time}</span></div>
+            {!!t.focusAreaName && <div style={{ fontSize: 12, color: C.accent, marginBottom: 6 }}>From Monitor setup: {t.focusAreaName}</div>}
             <div style={{ fontSize: 14, color: C.text, fontWeight: 600, lineHeight: 1.4, marginBottom: 4 }}>{t.title}</div>
             <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{t.body}</div>
           </div>
@@ -652,7 +738,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       <div style={{ background: C.card, borderRadius: 12, padding: "14px 20px", marginBottom: 16, border: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0 }}>
           <button onClick={() => setActiveThread(null)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 14, flexShrink: 0 }}>{"<-"}</button>
-          <div style={{ minWidth: 0 }}><div style={{ fontSize: 15, fontWeight: 700, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div><div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}><Badge color={C.blue}>{t.sub}</Badge><span style={{ fontSize: 11, color: C.muted }}>{[t.author, threadStatsText, t.time].filter(Boolean).join(" | ")}</span></div></div>
+          <div style={{ minWidth: 0 }}><div style={{ fontSize: 15, fontWeight: 700, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div><div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}><Badge color={C.blue}>{t.sub}</Badge>{t.focusAreaName && <Badge color={C.accent}>Monitor: {t.focusAreaName}</Badge>}<span style={{ fontSize: 11, color: C.muted }}>{[t.author, threadStatsText, t.time].filter(Boolean).join(" | ")}</span></div></div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>{isP ? <Badge color={C.green}> Posted</Badge> : <Badge color={C.warn}>Draft</Badge>}<button onClick={openReddit} disabled={!t.url} style={{ background: "transparent", color: t.url ? C.accent : C.muted, border: `1px solid ${t.url ? C.accent : C.border}`, borderRadius: 8, padding: "6px 14px", cursor: t.url ? "pointer" : "not-allowed", fontSize: 12, opacity: t.url ? 1 : 0.6 }}> View on Reddit</button></div>
       </div>

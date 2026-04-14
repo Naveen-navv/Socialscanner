@@ -43,16 +43,23 @@ function SubAdd({ onAdd }: { onAdd: (name: string, members: string) => void }) {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 12000);
-      const res = await fetch("/api/subreddit-about", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sub: normalizedName }),
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-      const data = await res.json().catch(() => ({}));
-      const m = data?.members;
-      if (m !== undefined && m !== null && String(m).trim() !== "") return String(m);
+      try {
+        const qs = new URLSearchParams({ sub: normalizedName });
+        let res = await fetch(`/api/subreddit-about?${qs}`, { signal: controller.signal });
+        if (!res.ok) {
+          res = await fetch("/api/subreddit-about", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sub: normalizedName }),
+            signal: controller.signal,
+          });
+        }
+        const data = await res.json().catch(() => ({}));
+        const m = data?.members;
+        if (m !== undefined && m !== null && String(m).trim() !== "") return String(m);
+      } finally {
+        clearTimeout(timeout);
+      }
     } catch {}
     return "?";
   };

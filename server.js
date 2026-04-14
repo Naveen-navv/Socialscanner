@@ -151,8 +151,23 @@ function buildRedditTokenRequest(grantType, extraParams = {}) {
 async function readRedditResponse(res) {
   const contentType = res.headers.get("content-type") || "";
   try {
-    if (contentType.includes("application/json")) return await res.json();
-    return await res.text();
+    const text = await res.text();
+    if (contentType.includes("application/json") || contentType.includes("+json")) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        return text;
+      }
+    }
+    const trimmed = text.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        return text;
+      }
+    }
+    return text;
   } catch {
     return null;
   }
@@ -404,12 +419,19 @@ async function fetchRedditJsonWithFallback(path, token) {
 function parseSubscribersFromAboutJson(body) {
   if (!body || typeof body !== "object") return null;
   const inner = body.data;
-  if (!inner || typeof inner !== "object") return null;
-  const raw = inner.subscribers ?? inner.subscriber_count;
-  if (raw == null || raw === "") return null;
-  const n = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isFinite(n) || n < 0) return null;
-  return n;
+  if (inner && typeof inner === "object") {
+    const raw = inner.subscribers ?? inner.subscriber_count;
+    if (raw != null && raw !== "") {
+      const n = typeof raw === "number" ? raw : Number(raw);
+      if (Number.isFinite(n) && n >= 0) return n;
+    }
+  }
+  const top = body.subscribers ?? body.subscriber_count;
+  if (top != null && top !== "") {
+    const n = typeof top === "number" ? top : Number(top);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return null;
 }
 
 function formatSubscriberCount(n) {
@@ -421,10 +443,11 @@ function formatSubscriberCount(n) {
 /** Try oauth (if token) then always public www/old — subscriber count is public; oauth-only was missing counts on 401/429. */
 async function fetchSubredditAboutMembers(subName, token) {
   const name = subName.replace(/^r\//i, "");
-  const path = `/r/${name}/about.json?raw_json=1`;
+  const path = `/r/${encodeURIComponent(name)}/about.json?raw_json=1`;
   const attempts = [];
   if (token) attempts.push({ base: "https://oauth.reddit.com", token });
   for (const t of REDDIT_PUBLIC_BASES) attempts.push({ base: t.base, token: null });
+  attempts.push({ base: "https://reddit.com", token: null });
 
   for (const { base, token: tk } of attempts) {
     try {
@@ -688,20 +711,13 @@ app.get("/api/test", async (req, res) => {
   }
 });
 
-// ── SPA fallback ─────────────────────────────────────────────
-app.get("*", (req, res) => {
-  const indexPath = join(__dirname, "dist", "index.html");
-  if (existsSync(indexPath)) res.sendFile(indexPath);
-  else res.status(200).send("Building... please refresh in a moment.");
-});
-
 async function fetchSubredditAbout(subName, token) {
   const name = subName.replace(/^r\//i, "");
   const membersFromAbout = await fetchSubredditAboutMembers(subName, token);
   const members = membersFromAbout || "?";
 
   let rules = [];
-  const rulesPath = `/r/${name}/about/rules.json?raw_json=1`;
+  const rulesPath = `/r/${encodeURIComponent(name)}/about/rules.json?raw_json=1`;
   const rulesAttempts = [];
   if (token) rulesAttempts.push({ base: "https://oauth.reddit.com", token });
   for (const t of REDDIT_PUBLIC_BASES) rulesAttempts.push({ base: t.base, token: null });
@@ -721,9 +737,9 @@ async function fetchSubredditAbout(subName, token) {
   return { members, rules };
 }
 
-app.post("/api/subreddit-about", async (req, res) => {
+async function handleSubredditAboutRequest(req, res) {
   try {
-    const rawSub = String(req.body?.sub || "").trim();
+    const rawSub = String(req.method === "GET" ? req.query.sub : req.body?.sub || "").trim();
     if (!rawSub) return res.status(400).json({ error: "Missing subreddit" });
     const sub = rawSub.startsWith("r/") ? rawSub : `r/${rawSub}`;
     const token = await getRedditToken();
@@ -733,6 +749,16 @@ app.post("/api/subreddit-about", async (req, res) => {
     console.error("Subreddit about API error:", err);
     res.status(500).json({ error: "Failed to fetch subreddit stats" });
   }
+}
+
+app.get("/api/subreddit-about", handleSubredditAboutRequest);
+app.post("/api/subreddit-about", handleSubredditAboutRequest);
+
+// ── SPA fallback ─────────────────────────────────────────────
+app.get("*", (req, res) => {
+  const indexPath = join(__dirname, "dist", "index.html");
+  if (existsSync(indexPath)) res.sendFile(indexPath);
+  else res.status(200).send("Building... please refresh in a moment.");
 });
 
 function buildIntelProfile(posts, meta = {}) {

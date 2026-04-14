@@ -687,6 +687,20 @@ async function fetchSubredditAbout(subName, token) {
   return { members, rules };
 }
 
+app.post("/api/subreddit-about", async (req, res) => {
+  try {
+    const rawSub = String(req.body?.sub || "").trim();
+    if (!rawSub) return res.status(400).json({ error: "Missing subreddit" });
+    const sub = rawSub.startsWith("r/") ? rawSub : `r/${rawSub}`;
+    const token = await getRedditToken();
+    const meta = await fetchSubredditAbout(sub, token);
+    res.json({ sub, members: meta.members });
+  } catch (err) {
+    console.error("Subreddit about API error:", err);
+    res.status(500).json({ error: "Failed to fetch subreddit stats" });
+  }
+});
+
 function buildIntelProfile(posts, meta = {}) {
   const now = new Date();
   const dateLabel = now.toLocaleDateString("en-US", { month: "short", day: "numeric" });

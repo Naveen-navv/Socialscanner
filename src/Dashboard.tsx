@@ -29,10 +29,59 @@ function TagInput({ tags, setTags, placeholder, color = C.accent }: { tags: stri
 
 function SubAdd({ onAdd }: { onAdd: (name: string, members: string) => void }) {
   const [v, setV] = useState("");
+  const [loading, setLoading] = useState(false);
   const f = v.trim() ? SUBS_DB.filter(s => s.name.toLowerCase().includes(v.toLowerCase())) : [];
+
+  const normalizeSubName = (raw: string) => {
+    const t = raw.trim();
+    return t.startsWith("r/") ? t : `r/${t}`;
+  };
+
+  const resolveMembers = async (normalizedName: string): Promise<string> => {
+    const hit = SUBS_DB.find((s) => s.name.toLowerCase() === normalizedName.toLowerCase());
+    if (hit) return hit.m;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      const res = await fetch("/api/subreddit-about", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sub: normalizedName }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      const data = await res.json().catch(() => ({}));
+      if (typeof data?.members === "string" && data.members) return data.members;
+    } catch {}
+    return "?";
+  };
+
+  const submit = async () => {
+    if (!v.trim() || loading) return;
+    const name = normalizeSubName(v);
+    setLoading(true);
+    try {
+      const members = await resolveMembers(name);
+      onAdd(name, members);
+      setV("");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (<div style={{ position: "relative" }}>
-    <input value={v} onChange={e => setV(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && v.trim()) { onAdd(v.trim().startsWith("r/") ? v.trim() : `r/${v.trim()}`, "?"); setV(""); } }} placeholder="Add subreddit..." style={{ width: "100%", padding: "8px 12px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 13, boxSizing: "border-box" }} />
-    {f.length > 0 && <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, marginTop: 4, zIndex: 10, maxHeight: 140, overflowY: "auto" }}>{f.map(p => <div key={p.name} onClick={() => { onAdd(p.name, p.m); setV(""); }} style={{ padding: "8px 12px", cursor: "pointer", display: "flex", justifyContent: "space-between", fontSize: 13, color: C.text }} onMouseEnter={e => (e.currentTarget.style.background = C.accentBg)} onMouseLeave={e => (e.currentTarget.style.background = "transparent")}><span>{p.name}</span><span style={{ color: C.muted, fontSize: 12 }}>{p.m}</span></div>)}</div>}
+    <div style={{ display: "flex", gap: 8, marginBottom: 0 }}>
+      <input
+        value={v}
+        disabled={loading}
+        onChange={e => setV(e.target.value)}
+        onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); void submit(); } }}
+        placeholder={loading ? "Fetching member count…" : "Add subreddit…"}
+        style={{ flex: 1, minWidth: 0, padding: "8px 12px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 13, boxSizing: "border-box", opacity: loading ? 0.75 : 1 }}
+      />
+      <button type="button" onClick={() => void submit()} disabled={loading || !v.trim()} style={{ flexShrink: 0, background: `${C.blue}20`, color: C.blue, border: `1px solid ${C.blue}40`, borderRadius: 8, padding: "8px 14px", cursor: loading || !v.trim() ? "not-allowed" : "pointer", fontWeight: 600, fontSize: 12, opacity: loading || !v.trim() ? 0.5 : 1 }}>+ Add</button>
+    </div>
+    {f.length > 0 && <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, marginTop: 4, zIndex: 10, maxHeight: 140, overflowY: "auto" }}>{f.map(p => <div key={p.name} onClick={() => { if (!loading) { onAdd(p.name, p.m); setV(""); } }} style={{ padding: "8px 12px", cursor: loading ? "default" : "pointer", display: "flex", justifyContent: "space-between", fontSize: 13, color: C.text }} onMouseEnter={e => (e.currentTarget.style.background = C.accentBg)} onMouseLeave={e => (e.currentTarget.style.background = "transparent")}><span>{p.name}</span><span style={{ color: C.muted, fontSize: 12 }}>{p.m}</span></div>)}</div>}
   </div>);
 }
 
@@ -385,16 +434,35 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
 
           const remoteData = await res.json();
           if (remoteData) {
-            const currentSavedAt = getSnapshotSavedAt(snapshotRef.current);
+            const latestLocalSavedAt = () => {
+              let t = getSnapshotSavedAt(snapshotRef.current);
+              try {
+                const raw = localStorage.getItem(localBackupKey);
+                if (raw) t = Math.max(t, getSnapshotSavedAt(JSON.parse(raw)));
+              } catch {}
+              return t;
+            };
             const remoteSavedAt = getSnapshotSavedAt(remoteData);
-            if (!localData || remoteSavedAt > currentSavedAt) {
+            const localAt = latestLocalSavedAt();
+            let diskEmpty = true;
+            try {
+              diskEmpty = !localStorage.getItem(localBackupKey);
+            } catch {}
+            const remoteHasRows =
+              (Array.isArray(remoteData.fa) && remoteData.fa.length > 0) ||
+              (Array.isArray(remoteData.intel) && remoteData.intel.length > 0);
+            // Prefer strictly newer remote. Never use stale `!localData` from mount — it can overwrite
+            // in-memory edits (e.g. removed intel) when the user had no backup at first paint.
+            const legacyFirstSync =
+              localAt === 0 && remoteSavedAt === 0 && diskEmpty && remoteHasRows;
+            if (remoteSavedAt > localAt || legacyFirstSync) {
               const remote = applyLoadedState(remoteData);
               snapshotRef.current = remoteData;
               for (const item of remote.loadedIntel) {
-              if (item.scanStatus === "scanning") {
-                void quickScanIntel(item.id, item.sub);
+                if (item.scanStatus === "scanning") {
+                  void quickScanIntel(item.id, item.sub);
+                }
               }
-            }
             }
           }
           setSaveState("idle");
@@ -784,7 +852,20 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
           <button onClick={() => addIntelSubreddit(newIntelSub)} style={{ background: C.accent, color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", cursor: "pointer", fontWeight: 600 }}>+ Learn</button>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 14 }}>{intel.map(si => <div key={si.id} onClick={() => setSelIntel(si.id)} style={{ background: C.card, borderRadius: 12, padding: 18, cursor: "pointer", border: `1px solid ${C.border}`, borderLeft: `4px solid ${si.scanStatus === "failed" ? C.danger : si.scanStatus === "scanning" ? C.accent : si.confidence >= 80 ? C.green : si.confidence >= 50 ? C.warn : C.muted}`, transition: "transform 0.15s", position: "relative" }} onMouseEnter={e => (e.currentTarget.style.transform = "translateY(-2px)")} onMouseLeave={e => (e.currentTarget.style.transform = "none")}>
-          <button onClick={e => { e.stopPropagation(); setIntel(p => p.filter(x => x.id !== si.id)); }} style={{ position: "absolute", top: 10, right: 12, background: "none", border: "none", color: C.muted, cursor: "pointer", opacity: 0.3 }} onMouseEnter={e => (e.currentTarget.style.opacity = "1")} onMouseLeave={e => (e.currentTarget.style.opacity = "0.3")}>x</button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIntel((p) => p.filter((x) => x.id !== si.id));
+              setSelIntel((cur) => (cur === si.id ? null : cur));
+            }}
+            style={{ position: "absolute", top: 10, right: 12, background: "none", border: "none", color: C.muted, cursor: "pointer", opacity: 0.3 }}
+            onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
+            onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.3")}
+          >
+            x
+          </button>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}><div><div style={{ fontSize: 17, fontWeight: 700, color: C.text }}>{si.sub}</div><div style={{ fontSize: 12, color: C.muted }}>{si.members}  {si.lastScanned}</div></div><div style={{ textAlign: "right" }}><div style={{ fontSize: 20, fontWeight: 800, color: si.confidence >= 80 ? C.green : si.confidence >= 50 ? C.warn : C.muted }}>{si.confidence}%</div><div style={{ fontSize: 10, color: C.muted }}>confidence</div></div></div>
           <div style={{ fontSize: 11, marginBottom: 10, color: si.scanStatus === "failed" ? C.danger : si.scanStatus === "scanning" ? C.accent : C.green }}>
             {si.scanStatus === "scanning" ? (si.scanMessage || "Analyzing...") : si.scanStatus === "failed" ? (si.scanMessage || "Analysis failed.") : "Analysis complete"}

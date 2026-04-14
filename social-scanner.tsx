@@ -122,10 +122,59 @@ function TagInput({ tags, setTags, placeholder, color = C.accent }) {
 }
 function SubAdd({ onAdd }) {
   const [v, setV] = useState("");
+  const [loading, setLoading] = useState(false);
   const f = v.trim() ? SUBS_DB.filter(s => s.name.toLowerCase().includes(v.toLowerCase())) : [];
+
+  const normalizeSubName = (raw) => {
+    const t = raw.trim();
+    return t.startsWith("r/") ? t : `r/${t}`;
+  };
+
+  const resolveMembers = async (normalizedName) => {
+    const hit = SUBS_DB.find((s) => s.name.toLowerCase() === normalizedName.toLowerCase());
+    if (hit) return hit.m;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      const res = await fetch("/api/subreddit-about", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sub: normalizedName }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      const data = await res.json().catch(() => ({}));
+      if (typeof data?.members === "string" && data.members) return data.members;
+    } catch {}
+    return "?";
+  };
+
+  const submit = async () => {
+    if (!v.trim() || loading) return;
+    const name = normalizeSubName(v);
+    setLoading(true);
+    try {
+      const members = await resolveMembers(name);
+      onAdd(name, members);
+      setV("");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (<div style={{ position: "relative" }}>
-    <input value={v} onChange={e => setV(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && v.trim()) { onAdd(v.trim().startsWith("r/") ? v.trim() : `r/${v.trim()}`, "?"); setV(""); } }} placeholder="Add subreddit..." style={{ width: "100%", padding: "8px 12px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 13, boxSizing: "border-box" }} />
-    {f.length > 0 && <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, marginTop: 4, zIndex: 10, maxHeight: 140, overflowY: "auto" }}>{f.map(p => <div key={p.name} onClick={() => { onAdd(p.name, p.m); setV(""); }} style={{ padding: "8px 12px", cursor: "pointer", display: "flex", justifyContent: "space-between", fontSize: 13, color: C.text }} onMouseEnter={e => e.currentTarget.style.background = C.accentBg} onMouseLeave={e => e.currentTarget.style.background = "transparent"}><span>{p.name}</span><span style={{ color: C.muted, fontSize: 12 }}>{p.m}</span></div>)}</div>}
+    <div style={{ display: "flex", gap: 8, marginBottom: 0 }}>
+      <input
+        value={v}
+        disabled={loading}
+        onChange={e => setV(e.target.value)}
+        onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); void submit(); } }}
+        placeholder={loading ? "Fetching member count…" : "Add subreddit…"}
+        style={{ flex: 1, minWidth: 0, padding: "8px 12px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 13, boxSizing: "border-box", opacity: loading ? 0.75 : 1 }}
+      />
+      <button type="button" onClick={() => void submit()} disabled={loading || !v.trim()} style={{ flexShrink: 0, background: `${C.blue}20`, color: C.blue, border: `1px solid ${C.blue}40`, borderRadius: 8, padding: "8px 14px", cursor: loading || !v.trim() ? "not-allowed" : "pointer", fontWeight: 600, fontSize: 12, opacity: loading || !v.trim() ? 0.5 : 1 }}>+ Add</button>
+    </div>
+    {f.length > 0 && <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, marginTop: 4, zIndex: 10, maxHeight: 140, overflowY: "auto" }}>{f.map(p => <div key={p.name} onClick={() => { if (!loading) { onAdd(p.name, p.m); setV(""); } }} style={{ padding: "8px 12px", cursor: loading ? "default" : "pointer", display: "flex", justifyContent: "space-between", fontSize: 13, color: C.text }} onMouseEnter={e => e.currentTarget.style.background = C.accentBg} onMouseLeave={e => e.currentTarget.style.background = "transparent"}><span>{p.name}</span><span style={{ color: C.muted, fontSize: 12 }}>{p.m}</span></div>)}</div>}
   </div>);
 }
 

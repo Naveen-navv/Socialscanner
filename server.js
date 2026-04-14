@@ -401,6 +401,43 @@ async function fetchRedditJsonWithFallback(path, token) {
   throw new Error(errors.join(", "));
 }
 
+function parseSubscribersFromAboutJson(body) {
+  if (!body || typeof body !== "object") return null;
+  const inner = body.data;
+  if (!inner || typeof inner !== "object") return null;
+  const raw = inner.subscribers ?? inner.subscriber_count;
+  if (raw == null || raw === "") return null;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
+function formatSubscriberCount(n) {
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+  if (n >= 1000) return `${Math.round(n / 1000)}K`;
+  return String(n);
+}
+
+/** Try oauth (if token) then always public www/old — subscriber count is public; oauth-only was missing counts on 401/429. */
+async function fetchSubredditAboutMembers(subName, token) {
+  const name = subName.replace(/^r\//i, "");
+  const path = `/r/${name}/about.json?raw_json=1`;
+  const attempts = [];
+  if (token) attempts.push({ base: "https://oauth.reddit.com", token });
+  for (const t of REDDIT_PUBLIC_BASES) attempts.push({ base: t.base, token: null });
+
+  for (const { base, token: tk } of attempts) {
+    try {
+      const res = await fetch(`${base}${path}`, { headers: buildRedditHeaders(tk) });
+      const body = await readRedditResponse(res);
+      if (!res.ok) continue;
+      const n = parseSubscribersFromAboutJson(body);
+      if (n != null) return formatSubscriberCount(n);
+    } catch {}
+  }
+  return null;
+}
+
 function getRedditCacheKey({ subreddits = [], intentPatterns = [], toolTerms = [], searchAll = false }) {
   const normalizedSubs = subreddits
     .map((sub) => (typeof sub === "string" ? sub : sub.name || ""))
@@ -660,30 +697,27 @@ app.get("*", (req, res) => {
 
 async function fetchSubredditAbout(subName, token) {
   const name = subName.replace(/^r\//i, "");
-  const [aboutRes, rulesRes] = await Promise.allSettled([
-    fetchRedditJsonWithFallback(`/r/${name}/about.json?raw_json=1`, token),
-    fetchRedditJsonWithFallback(`/r/${name}/about/rules.json?raw_json=1`, token),
-  ]);
+  const membersFromAbout = await fetchSubredditAboutMembers(subName, token);
+  const members = membersFromAbout || "?";
 
-  let members = "?";
   let rules = [];
-  if (aboutRes.status === "fulfilled") {
+  const rulesPath = `/r/${name}/about/rules.json?raw_json=1`;
+  const rulesAttempts = [];
+  if (token) rulesAttempts.push({ base: "https://oauth.reddit.com", token });
+  for (const t of REDDIT_PUBLIC_BASES) rulesAttempts.push({ base: t.base, token: null });
+  for (const { base, token: tk } of rulesAttempts) {
     try {
-      const aboutData = aboutRes.value.data;
-      const subscribers = aboutData?.data?.subscribers;
-      if (typeof subscribers === "number") {
-        if (subscribers >= 1000000) members = `${(subscribers / 1000000).toFixed(1)}M`;
-        else if (subscribers >= 1000) members = `${Math.round(subscribers / 1000)}K`;
-        else members = String(subscribers);
+      const res = await fetch(`${base}${rulesPath}`, { headers: buildRedditHeaders(tk) });
+      const rulesData = await readRedditResponse(res);
+      if (!res.ok) continue;
+      const list = rulesData?.rules || rulesData?.data?.rules;
+      if (Array.isArray(list) && list.length) {
+        rules = list.map((r) => r.short_name || r.description || "").filter(Boolean);
+        break;
       }
     } catch {}
   }
-  if (rulesRes.status === "fulfilled") {
-    try {
-      const rulesData = rulesRes.value.data;
-      rules = (rulesData?.rules || []).map((r) => r.short_name || r.description || "").filter(Boolean);
-    } catch {}
-  }
+
   return { members, rules };
 }
 

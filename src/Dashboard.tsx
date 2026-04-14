@@ -51,7 +51,8 @@ function SubAdd({ onAdd }: { onAdd: (name: string, members: string) => void }) {
       });
       clearTimeout(timeout);
       const data = await res.json().catch(() => ({}));
-      if (typeof data?.members === "string" && data.members) return data.members;
+      const m = data?.members;
+      if (m !== undefined && m !== null && String(m).trim() !== "") return String(m);
     } catch {}
     return "?";
   };

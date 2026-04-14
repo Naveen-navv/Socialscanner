@@ -619,10 +619,9 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
 
     for (const [subName, members] of monitorSubs.entries()) {
       const existing = existingBySub.get(subName);
-      if (!existing) {
-        addIntelSubreddit(subName, members);
-        continue;
-      }
+      // Do not auto-add intel when a sub is only in Monitor — that undoes "remove" here and
+      // re-triggers analysis. Users add intelligence via "+ Learn" (or we could sync only new Monitor subs later).
+      if (!existing) continue;
       if (existing.scanStatus === "scanning" || existing.scanStatus === "failed") continue;
       if (!isLiveIntelEntry(existing)) {
         void quickScanIntel(existing.id, subName);

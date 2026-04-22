@@ -132,6 +132,18 @@ function getApifyActorPathId(actorId = getApifyActorId()) {
   return id.includes("/") ? id.replace("/", "~") : id;
 }
 
+function getApifyActorCandidates() {
+  const configured = getApifyActorId();
+  const defaults = [
+    "trudax/reddit-scraper-lite",
+    "apify/reddit-scraper",
+  ];
+  const candidates = [configured, ...defaults]
+    .map((id) => String(id || "").trim())
+    .filter(Boolean);
+  return Array.from(new Set(candidates));
+}
+
 function getApifyTokenError() {
   return "Missing APIFY_API_TOKEN. Add it in Railway environment variables.";
 }
@@ -337,21 +349,32 @@ function formatSubscriberCount(n) {
 async function runApifyActor(input) {
   const token = getApifyToken();
   if (!token) throw new Error(getApifyTokenError());
-  const actorId = getApifyActorId();
-  const actorPathId = getApifyActorPathId(actorId);
-  const endpoint = `${APIFY_API_BASE}/acts/${encodeURIComponent(actorPathId)}/run-sync-get-dataset-items`;
-  const qs = new URLSearchParams({ token, clean: "true", format: "json" });
-  const res = await fetch(`${endpoint}?${qs.toString()}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  const payload = await readJsonOrText(res);
-  if (!res.ok) throw new Error(formatRedditHttpError(res.status, payload));
-  if (!Array.isArray(payload)) {
-    throw new Error("Apify actor returned unexpected response shape");
+  const actorCandidates = getApifyActorCandidates();
+  const errors = [];
+
+  for (const actorId of actorCandidates) {
+    const actorPathId = getApifyActorPathId(actorId);
+    const endpoint = `${APIFY_API_BASE}/acts/${encodeURIComponent(actorPathId)}/run-sync-get-dataset-items`;
+    const qs = new URLSearchParams({ token, clean: "true", format: "json" });
+    const res = await fetch(`${endpoint}?${qs.toString()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    const payload = await readJsonOrText(res);
+    if (!res.ok) {
+      const detail = formatRedditHttpError(res.status, payload);
+      errors.push(`${actorId}: ${detail}`);
+      continue;
+    }
+    if (!Array.isArray(payload)) {
+      errors.push(`${actorId}: Apify actor returned unexpected response shape`);
+      continue;
+    }
+    return { items: payload, actorId };
   }
-  return payload;
+
+  throw new Error(errors.length ? errors.join(" | ") : "All Apify actor candidates failed");
 }
 
 async function runApifyWithInputCandidates(candidates, fallbackError) {
@@ -359,7 +382,7 @@ async function runApifyWithInputCandidates(candidates, fallbackError) {
   for (const input of candidates) {
     try {
       const data = await runApifyActor(input);
-      return { items: data, errors };
+      return { items: data.items, actorId: data.actorId, errors };
     } catch (err) {
       errors.push((err && err.message) || "Apify run failed");
     }
@@ -387,7 +410,7 @@ function searchInputCandidates(query, limit = 100) {
 
 async function fetchSubredditPosts(subName, _token) {
   const name = normalizeSubredditName(subName);
-  const { items, errors } = await runApifyWithInputCandidates(
+  const { items, actorId, errors } = await runApifyWithInputCandidates(
     subredditInputCandidates(name, 100),
     `Apify failed to fetch posts for ${subName}`
   );
@@ -401,7 +424,7 @@ async function fetchSubredditPosts(subName, _token) {
     seen.add(post.id);
     deduped.push(post);
   }
-  return { posts: deduped, errors, statuses: [`apify:${deduped.length}`] };
+  return { posts: deduped, errors, statuses: [`apify:${actorId || "unknown"}:${deduped.length}`] };
 }
 
 function getRedditCacheKey({ subreddits = [], intentPatterns = [], toolTerms = [], searchAll = false }) {
@@ -611,7 +634,7 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 app.get("/api/test", async (req, res) => {
   const token = getApifyToken();
   const actorId = getApifyActorId();
-  const actorPathId = getApifyActorPathId(actorId);
+  const actorCandidates = getApifyActorCandidates();
   if (!token) return res.json({ ok: false, error: getApifyTokenError() });
   try {
     const meRes = await fetch(`${APIFY_API_BASE}/users/me?token=${encodeURIComponent(token)}`);
@@ -624,22 +647,37 @@ app.get("/api/test", async (req, res) => {
       });
     }
 
-    const actorRes = await fetch(`${APIFY_API_BASE}/acts/${encodeURIComponent(actorPathId)}?token=${encodeURIComponent(token)}`);
-    const actorData = await readJsonOrText(actorRes);
-    if (!actorRes.ok) {
+    let resolvedActorId = null;
+    let resolvedActorPathId = null;
+    const actorErrors = [];
+    for (const candidate of actorCandidates) {
+      const candidatePath = getApifyActorPathId(candidate);
+      const actorRes = await fetch(`${APIFY_API_BASE}/acts/${encodeURIComponent(candidatePath)}?token=${encodeURIComponent(token)}`);
+      const actorData = await readJsonOrText(actorRes);
+      if (actorRes.ok) {
+        resolvedActorId = candidate;
+        resolvedActorPathId = candidatePath;
+        break;
+      }
+      actorErrors.push(`${candidate}: ${formatRedditHttpError(actorRes.status, actorData)}`);
+    }
+
+    if (!resolvedActorId) {
       return res.json({
         ok: false,
         error: "Apify actor not accessible",
         actorId,
-        actorPathId,
-        detail: formatRedditHttpError(actorRes.status, actorData),
+        actorCandidates,
+        detail: actorErrors.join(" | "),
       });
     }
 
     return res.json({
       ok: true,
       actorId,
-      actorPathId,
+      actorPathId: resolvedActorPathId,
+      resolvedActorId,
+      actorCandidates,
       user: meData?.data?.username || meData?.username || "unknown",
       message: "Apify credentials valid",
     });

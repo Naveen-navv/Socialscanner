@@ -110,45 +110,27 @@ app.put("/api/data", async (req, res) => {
   }
 });
 
-// ── Reddit OAuth token cache ─────────────────────────────────
-let cachedToken = null;
-let tokenExpiry = 0;
-let lastRedditAuthError = null;
+// ── Apify Reddit scraping config/cache ───────────────────────
 const REDDIT_RESULT_TTL_MS = 5 * 60 * 1000;
 const SUBREDDIT_EMPTY_TTL_MS = 3 * 60 * 1000;
-const REDDIT_USER_AGENT = "SocialScanner/1.0 (+https://github.com/Naveen-navv/Socialscanner)";
-const REDDIT_ACCEPT_HEADER = "application/json, text/plain, */*";
-const REDDIT_PUBLIC_BASES = [
-  { label: "www", base: "https://www.reddit.com" },
-  { label: "old", base: "https://old.reddit.com" },
-];
+const APIFY_API_BASE = "https://api.apify.com/v2";
 const redditResultCache = new Map();
 const subredditCooldowns = new Map();
+const apifyPostCache = new Map();
 
-function getRedditRequestTargets(token) {
-  return token
-    ? [{ label: "oauth", base: "https://oauth.reddit.com" }]
-    : REDDIT_PUBLIC_BASES;
+function getApifyToken() {
+  return String(process.env.APIFY_API_TOKEN || "").trim() || null;
 }
 
-function buildRedditHeaders(token) {
-  const headers = {
-    "User-Agent": REDDIT_USER_AGENT,
-    "Accept": REDDIT_ACCEPT_HEADER,
-  };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  return headers;
+function getApifyActorId() {
+  return String(process.env.APIFY_REDDIT_ACTOR_ID || "apify/reddit-scraper").trim();
 }
 
-function buildRedditTokenRequest(grantType, extraParams = {}) {
-  const params = new URLSearchParams({ grant_type: grantType });
-  for (const [key, value] of Object.entries(extraParams)) {
-    if (value) params.set(key, value);
-  }
-  return params.toString();
+function getApifyTokenError() {
+  return "Missing APIFY_API_TOKEN. Add it in Railway environment variables.";
 }
 
-async function readRedditResponse(res) {
+async function readJsonOrText(res) {
   const contentType = res.headers.get("content-type") || "";
   try {
     const text = await res.text();
@@ -189,91 +171,24 @@ function formatRedditHttpError(status, payload) {
   return `HTTP ${status}`;
 }
 
-async function getRedditToken() {
-  if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
-  const clientId = process.env.REDDIT_CLIENT_ID;
-  const clientSecret = process.env.REDDIT_CLIENT_SECRET;
-  const refreshToken = process.env.REDDIT_REFRESH_TOKEN;
-  if (!clientId || !clientSecret) {
-    lastRedditAuthError = "Missing REDDIT_CLIENT_ID or REDDIT_CLIENT_SECRET";
-    return null;
+function parseUtc(value) {
+  if (typeof value === "number") {
+    return value > 1000000000000 ? Math.floor(value / 1000) : Math.floor(value);
   }
-
-  const attempts = refreshToken
-    ? [
-        { label: "refresh_token", body: buildRedditTokenRequest("refresh_token", { refresh_token: refreshToken }) },
-        { label: "client_credentials", body: buildRedditTokenRequest("client_credentials") },
-      ]
-    : [{ label: "client_credentials", body: buildRedditTokenRequest("client_credentials") }];
-  const errors = [];
-
-  for (const attempt of attempts) {
-    try {
-      const res = await fetch("https://www.reddit.com/api/v1/access_token", {
-        method: "POST",
-        headers: {
-          Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
-          "Content-Type": "application/x-www-form-urlencoded",
-          "User-Agent": REDDIT_USER_AGENT,
-        },
-        body: attempt.body,
-      });
-      const data = await readRedditResponse(res);
-      if (!res.ok || !data?.access_token) {
-        errors.push(`${attempt.label}: ${formatRedditHttpError(res.status, data)}`);
-        continue;
-      }
-      cachedToken = data.access_token;
-      tokenExpiry = Date.now() + Math.max(60, (Number(data.expires_in) || 3600) - 60) * 1000;
-      lastRedditAuthError = null;
-      return cachedToken;
-    } catch (err) {
-      errors.push(`${attempt.label}: ${(err && err.message) || "network error"}`);
-    }
+  if (typeof value === "string" && value.trim()) {
+    const asNumber = Number(value);
+    if (Number.isFinite(asNumber)) return parseUtc(asNumber);
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) return Math.floor(parsed / 1000);
   }
-
-  cachedToken = null;
-  tokenExpiry = 0;
-  lastRedditAuthError = errors.length ? errors.join(" | ") : "Unknown Reddit auth error";
-  console.warn("Reddit token fetch failed:", lastRedditAuthError);
-  return null;
+  return Math.floor(Date.now() / 1000);
 }
 
-// ── Fetch posts from a subreddit (hot + new) ─────────────────
-async function fetchRedditListingFromBase(target, endpoints, token) {
-  const headers = buildRedditHeaders(token);
-  const results = await Promise.allSettled(
-    endpoints.map((endpoint) => fetch(`${target.base}${endpoint.path}`, { headers }))
-  );
-  const posts = [];
-  const seen = new Set();
-  const errors = [];
-  const statuses = [];
-
-  for (let i = 0; i < results.length; i++) {
-    const endpoint = endpoints[i];
-    const result = results[i];
-    if (result.status !== "fulfilled") {
-      errors.push(`${target.label}:${endpoint.label}: ${result.reason?.message || "request failed"}`);
-      continue;
-    }
-
-    const response = result.value;
-    statuses.push(`${target.label}:${endpoint.label}:${response.status}`);
-    const data = await readRedditResponse(response);
-    if (!response.ok) {
-      errors.push(`${target.label}:${endpoint.label}: ${formatRedditHttpError(response.status, data)}`);
-      continue;
-    }
-
-    for (const child of data?.data?.children || []) {
-      if (!child?.data?.id || seen.has(child.data.id)) continue;
-      seen.add(child.data.id);
-      posts.push(child.data);
-    }
-  }
-
-  return { posts, errors, statuses };
+function normalizeSubredditName(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  if (text.startsWith("r/")) return text.slice(2);
+  return text;
 }
 
 function decodeHtmlEntities(input = "") {
@@ -343,95 +258,67 @@ function parseRedditFeedPosts(feedText, subName) {
   }).filter((post) => post.id && post.title);
 }
 
-async function fetchSubredditFeedPosts(subName) {
-  const name = subName.replace(/^r\//i, "");
-  const targets = REDDIT_PUBLIC_BASES;
-  const headers = { "User-Agent": REDDIT_USER_AGENT, "Accept": "application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.1" };
-  const errors = [];
-  const statuses = [];
-
-  for (const target of targets) {
-    try {
-      const res = await fetch(`${target.base}/r/${name}/.rss`, { headers });
-      statuses.push(`${target.label}:rss:${res.status}`);
-      const text = await res.text();
-      if (!res.ok) {
-        errors.push(`${target.label}:rss: ${formatRedditHttpError(res.status, text)}`);
-        continue;
-      }
-      const posts = parseRedditFeedPosts(text, subName);
-      if (posts.length > 0) return { posts, errors, statuses };
-      errors.push(`${target.label}:rss: feed returned no parsable posts`);
-    } catch (err) {
-      errors.push(`${target.label}:rss: ${(err && err.message) || "request failed"}`);
-    }
-  }
-
-  return { posts: [], errors, statuses };
+function extractSubredditFromUrl(url) {
+  const m = String(url || "").match(/\/r\/([^/]+)/i);
+  return m ? m[1] : "";
 }
 
-async function fetchSubredditPosts(subName, token) {
-  const name = subName.replace(/^r\//, "");
-  const endpoints = [
-    { label: "hot", path: `/r/${name}/hot.json?limit=50&raw_json=1` },
-    { label: "new", path: `/r/${name}/new.json?limit=50&raw_json=1` },
-  ];
-  const targets = getRedditRequestTargets(token);
-  const fallbackErrors = [];
-  const fallbackStatuses = [];
-
-  for (const target of targets) {
-    const result = await fetchRedditListingFromBase(target, endpoints, token);
-    if (result.posts.length > 0) return result;
-    fallbackErrors.push(...result.errors);
-    fallbackStatuses.push(...result.statuses);
+function extractPermalink(item) {
+  if (typeof item?.permalink === "string" && item.permalink.trim()) return item.permalink;
+  const url = String(item?.url || item?.postUrl || item?.link || "").trim();
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    return u.pathname || "";
+  } catch {
+    return url.replace(/^https?:\/\/[^/]+/i, "");
   }
-
-  if (!token) {
-    const feedResult = await fetchSubredditFeedPosts(subName);
-    if (feedResult.posts.length > 0) return feedResult;
-    fallbackErrors.push(...feedResult.errors);
-    fallbackStatuses.push(...feedResult.statuses);
-  }
-
-  return { posts: [], errors: fallbackErrors, statuses: fallbackStatuses };
 }
 
-async function fetchRedditJsonWithFallback(path, token) {
-  const targets = getRedditRequestTargets(token);
-  const headers = buildRedditHeaders(token);
-  const errors = [];
-
-  for (const target of targets) {
-    try {
-      const res = await fetch(`${target.base}${path}`, { headers });
-      const data = await readRedditResponse(res);
-      if (res.ok) return { data, target, status: res.status };
-      errors.push(`${target.label}: ${formatRedditHttpError(res.status, data)}`);
-    } catch (err) {
-      errors.push(`${target.label}: ${(err && err.message) || "request failed"}`);
-    }
-  }
-
-  throw new Error(errors.join(", "));
+function extractTopComment(item) {
+  const firstFromList = Array.isArray(item?.topComments) ? item.topComments[0] : null;
+  const firstComment = firstFromList || item?.topComment || item?.comment;
+  if (!firstComment) return null;
+  const text = String(firstComment?.text || firstComment?.body || firstComment?.comment || "").trim();
+  if (!text) return null;
+  const upvotes = Number(firstComment?.score || firstComment?.upvotes || 0);
+  const author = String(firstComment?.author || firstComment?.username || "unknown");
+  return {
+    text: text.slice(0, 250),
+    upvotes: Number.isFinite(upvotes) ? upvotes : 0,
+    author: `u/${author.replace(/^u\//i, "")}`,
+  };
 }
 
-function parseSubscribersFromAboutJson(body) {
-  if (!body || typeof body !== "object") return null;
-  const inner = body.data;
-  if (inner && typeof inner === "object") {
-    const raw = inner.subscribers ?? inner.subscriber_count;
-    if (raw != null && raw !== "") {
-      const n = typeof raw === "number" ? raw : Number(raw);
-      if (Number.isFinite(n) && n >= 0) return n;
-    }
-  }
-  const top = body.subscribers ?? body.subscriber_count;
-  if (top != null && top !== "") {
-    const n = typeof top === "number" ? top : Number(top);
-    if (Number.isFinite(n) && n >= 0) return n;
-  }
-  return null;
+function normalizeApifyPost(item, fallbackSub = "") {
+  const id = String(item?.id || item?.postId || item?.post_id || "").trim();
+  const title = String(item?.title || item?.postTitle || "").trim();
+  if (!id || !title) return null;
+
+  const subreddit = normalizeSubredditName(
+    item?.subreddit || item?.subredditName || item?.sub || extractSubredditFromUrl(item?.url || item?.postUrl || item?.permalink || "") || fallbackSub
+  );
+  const author = String(item?.author || item?.username || item?.user || "unknown").replace(/^u\//i, "");
+  const scoreRaw = item?.score ?? item?.upVotes ?? item?.upvotes ?? item?.ups;
+  const commentsRaw = item?.num_comments ?? item?.numComments ?? item?.commentsCount ?? item?.comments;
+
+  const post = {
+    id,
+    title,
+    selftext: String(item?.selftext || item?.body || item?.text || item?.content || "").trim(),
+    permalink: extractPermalink(item) || `/comments/${id}`,
+    created_utc: parseUtc(item?.created_utc ?? item?.createdAt ?? item?.created ?? item?.timestamp),
+    author: author || "unknown",
+    subreddit: subreddit || normalizeSubredditName(fallbackSub),
+    score: Number.isFinite(Number(scoreRaw)) ? Number(scoreRaw) : null,
+    num_comments: Number.isFinite(Number(commentsRaw)) ? Number(commentsRaw) : null,
+    _source: "apify",
+    _topComment: extractTopComment(item),
+    _raw: item,
+  };
+
+  apifyPostCache.set(post.id, post);
+  return post;
 }
 
 function formatSubscriberCount(n) {
@@ -440,25 +327,73 @@ function formatSubscriberCount(n) {
   return String(n);
 }
 
-/** Try oauth (if token) then always public www/old — subscriber count is public; oauth-only was missing counts on 401/429. */
-async function fetchSubredditAboutMembers(subName, token) {
-  const name = subName.replace(/^r\//i, "");
-  const path = `/r/${encodeURIComponent(name)}/about.json?raw_json=1`;
-  const attempts = [];
-  if (token) attempts.push({ base: "https://oauth.reddit.com", token });
-  for (const t of REDDIT_PUBLIC_BASES) attempts.push({ base: t.base, token: null });
-  attempts.push({ base: "https://reddit.com", token: null });
-
-  for (const { base, token: tk } of attempts) {
-    try {
-      const res = await fetch(`${base}${path}`, { headers: buildRedditHeaders(tk) });
-      const body = await readRedditResponse(res);
-      if (!res.ok) continue;
-      const n = parseSubscribersFromAboutJson(body);
-      if (n != null) return formatSubscriberCount(n);
-    } catch {}
+async function runApifyActor(input) {
+  const token = getApifyToken();
+  if (!token) throw new Error(getApifyTokenError());
+  const actorId = getApifyActorId();
+  const endpoint = `${APIFY_API_BASE}/acts/${encodeURIComponent(actorId)}/run-sync-get-dataset-items`;
+  const qs = new URLSearchParams({ token, clean: "true", format: "json" });
+  const res = await fetch(`${endpoint}?${qs.toString()}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const payload = await readJsonOrText(res);
+  if (!res.ok) throw new Error(formatRedditHttpError(res.status, payload));
+  if (!Array.isArray(payload)) {
+    throw new Error("Apify actor returned unexpected response shape");
   }
-  return null;
+  return payload;
+}
+
+async function runApifyWithInputCandidates(candidates, fallbackError) {
+  const errors = [];
+  for (const input of candidates) {
+    try {
+      const data = await runApifyActor(input);
+      return { items: data, errors };
+    } catch (err) {
+      errors.push((err && err.message) || "Apify run failed");
+    }
+  }
+  throw new Error(errors.length ? errors.join(" | ") : fallbackError);
+}
+
+function subredditInputCandidates(subName, limit = 100) {
+  const name = normalizeSubredditName(subName);
+  return [
+    { subreddits: [name], maxItems: limit, sort: "new" },
+    { subreddit: name, maxItems: limit, sort: "new" },
+    { startUrls: [`https://www.reddit.com/r/${name}/new/`], maxItems: limit },
+    { searchQueries: [`subreddit:${name}`], maxItems: limit, sort: "new" },
+  ];
+}
+
+function searchInputCandidates(query, limit = 100) {
+  return [
+    { searchQueries: [query], maxItems: limit, sort: "relevance" },
+    { query, maxItems: limit, sort: "relevance" },
+    { startUrls: [`https://www.reddit.com/search/?q=${encodeURIComponent(query)}`], maxItems: limit },
+  ];
+}
+
+async function fetchSubredditPosts(subName, _token) {
+  const name = normalizeSubredditName(subName);
+  const { items, errors } = await runApifyWithInputCandidates(
+    subredditInputCandidates(name, 100),
+    `Apify failed to fetch posts for ${subName}`
+  );
+  const normalized = items
+    .map((item) => normalizeApifyPost(item, name))
+    .filter(Boolean);
+  const deduped = [];
+  const seen = new Set();
+  for (const post of normalized) {
+    if (seen.has(post.id)) continue;
+    seen.add(post.id);
+    deduped.push(post);
+  }
+  return { posts: deduped, errors, statuses: [`apify:${deduped.length}`] };
 }
 
 function getRedditCacheKey({ subreddits = [], intentPatterns = [], toolTerms = [], searchAll = false }) {
@@ -510,11 +445,15 @@ function setSubredditCooldown(subName, reason = "empty response") {
   });
 }
 
-// ── Search all of Reddit ─────────────────────────────────────
-async function searchReddit(query, token) {
-  const path = `/search.json?q=${encodeURIComponent(query)}&sort=relevance&limit=100&type=link&t=week&raw_json=1`;
-  const { data } = await fetchRedditJsonWithFallback(path, token);
-  return (data?.data?.children || []).map((c) => c.data);
+// ── Search all of Reddit via Apify ───────────────────────────
+async function searchReddit(query, _token) {
+  const { items } = await runApifyWithInputCandidates(
+    searchInputCandidates(query, 100),
+    "Apify failed to search Reddit"
+  );
+  return items
+    .map((item) => normalizeApifyPost(item))
+    .filter(Boolean);
 }
 
 // ── Fetch top comment ────────────────────────────────────────
@@ -530,17 +469,12 @@ function extractThreadListingReply(data) {
 }
 
 async function fetchPostSnapshot(postId, token) {
-  const path = `/comments/${postId}.json?limit=3&depth=1&raw_json=1`;
-  try {
-    const { data } = await fetchRedditJsonWithFallback(path, token);
-    if (!Array.isArray(data)) return { post: null, replyTo: null };
-    return {
-      post: extractThreadListingPost(data),
-      replyTo: extractThreadListingReply(data),
-    };
-  } catch {
-    return { post: null, replyTo: null };
-  }
+  const cached = apifyPostCache.get(postId);
+  if (!cached) return { post: null, replyTo: null };
+  return {
+    post: cached,
+    replyTo: cached._topComment || null,
+  };
 }
 
 function timeAgo(utc) {
@@ -555,6 +489,7 @@ app.post("/api/reddit", async (req, res) => {
   try {
     const { subreddits = [], keywords = [], intentPatterns = [], toolTerms = [], searchAll = false } = req.body;
     if (!searchAll && !subreddits.length) return res.json({ threads: [] });
+    if (!getApifyToken()) return res.status(503).json({ error: getApifyTokenError() });
 
     const cacheKey = getRedditCacheKey({ subreddits, intentPatterns, toolTerms, searchAll });
     const cachedResult = getCachedRedditResult(cacheKey);
@@ -565,18 +500,10 @@ app.post("/api/reddit", async (req, res) => {
       });
     }
 
-    const token = await getRedditToken();
-    const hasOAuth = Boolean(token);
+    const token = null;
     const threads = [];
     let allPosts = [];
     const fetchErrors = [];
-    if (!hasOAuth) {
-      fetchErrors.push(
-        lastRedditAuthError
-          ? `Reddit OAuth unavailable (${lastRedditAuthError}), falling back to public endpoints`
-          : "Reddit OAuth token unavailable, falling back to public endpoints"
-      );
-    }
 
     if (searchAll) {
       const queryTerms = intentPatterns.slice(0, 4).map((p) => `"${p}"`);
@@ -600,17 +527,17 @@ app.post("/api/reddit", async (req, res) => {
           const { posts, errors, statuses } = await fetchSubredditPosts(subName, token);
           if (posts.length === 0) {
             const rateLimited = errors.some((msg) => msg.includes("HTTP 429"));
-            if (hasOAuth && rateLimited) setSubredditCooldown(subName, "rate limited");
+            if (rateLimited) setSubredditCooldown(subName, "rate limited");
             const detail = errors.length
               ? errors.join(", ")
-              : `${hasOAuth ? "no posts returned from OAuth API" : "public endpoint returned no posts"}${statuses.length ? ` [${statuses.join(", ")}]` : ""}`;
+              : `Apify returned no posts${statuses.length ? ` [${statuses.join(", ")}]` : ""}`;
             fetchErrors.push(`${subName}: ${detail}`);
           } else if (errors.length) {
             fetchErrors.push(`${subName}: partial fetch (${errors.join(", ")})`);
           }
           allPosts.push(...posts.map((p) => ({ ...p, _sub: sub })));
         } catch (err) {
-          if (hasOAuth && String(err.message || "").includes("429")) setSubredditCooldown(subName, err.message);
+          if (String(err.message || "").includes("429")) setSubredditCooldown(subName, err.message);
           fetchErrors.push(`${subName}: ${err.message}`);
           console.warn(`Failed to fetch ${subName}:`, err.message);
         }
@@ -674,66 +601,80 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 
 // ── Credential test ──────────────────────────────────────────
 app.get("/api/test", async (req, res) => {
-  const clientId = process.env.REDDIT_CLIENT_ID;
-  const clientSecret = process.env.REDDIT_CLIENT_SECRET;
-  const refreshToken = process.env.REDDIT_REFRESH_TOKEN;
-  if (!clientId || !clientSecret) return res.json({ ok: false, error: "Missing REDDIT_CLIENT_ID or REDDIT_CLIENT_SECRET" });
+  const token = getApifyToken();
+  const actorId = getApifyActorId();
+  if (!token) return res.json({ ok: false, error: getApifyTokenError() });
   try {
-    const body = refreshToken
-      ? buildRedditTokenRequest("refresh_token", { refresh_token: refreshToken })
-      : buildRedditTokenRequest("client_credentials");
-    const r = await fetch("https://www.reddit.com/api/v1/access_token", {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": REDDIT_USER_AGENT,
-      },
-      body,
-    });
-    const data = await readRedditResponse(r);
-    if (r.ok && data?.access_token) {
+    const meRes = await fetch(`${APIFY_API_BASE}/users/me?token=${encodeURIComponent(token)}`);
+    const meData = await readJsonOrText(meRes);
+    if (!meRes.ok) {
       return res.json({
-        ok: true,
-        grantType: refreshToken ? "refresh_token" : "client_credentials",
-        message: "Reddit credentials valid",
-        tokenPreview: data.access_token.slice(0, 10) + "...",
+        ok: false,
+        error: "Apify token rejected",
+        detail: formatRedditHttpError(meRes.status, meData),
       });
     }
+
+    const actorRes = await fetch(`${APIFY_API_BASE}/acts/${encodeURIComponent(actorId)}?token=${encodeURIComponent(token)}`);
+    const actorData = await readJsonOrText(actorRes);
+    if (!actorRes.ok) {
+      return res.json({
+        ok: false,
+        error: "Apify actor not accessible",
+        actorId,
+        detail: formatRedditHttpError(actorRes.status, actorData),
+      });
+    }
+
     return res.json({
-      ok: false,
-      grantType: refreshToken ? "refresh_token" : "client_credentials",
-      error: "Reddit rejected credentials",
-      detail: formatRedditHttpError(r.status, data),
+      ok: true,
+      actorId,
+      user: meData?.data?.username || meData?.username || "unknown",
+      message: "Apify credentials valid",
     });
   } catch (e) {
     return res.json({ ok: false, error: e.message });
   }
 });
 
+function parseSubscribersFromAny(item) {
+  if (!item || typeof item !== "object") return null;
+  const candidates = [
+    item.subscribers,
+    item.subscriberCount,
+    item.subscribersCount,
+    item.communitySize,
+    item.subredditSubscribers,
+    item?.subreddit?.subscribers,
+  ];
+  for (const value of candidates) {
+    if (value == null || value === "") continue;
+    const n = Number(value);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return null;
+}
+
+function extractRulesFromAny(item) {
+  const raw = item?.rules || item?.subredditRules || item?.communityRules;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((r) => {
+      if (typeof r === "string") return r.trim();
+      if (r && typeof r === "object") return String(r.short_name || r.name || r.description || "").trim();
+      return "";
+    })
+    .filter(Boolean)
+    .slice(0, 5);
+}
+
 async function fetchSubredditAbout(subName, token) {
   const name = subName.replace(/^r\//i, "");
-  const membersFromAbout = await fetchSubredditAboutMembers(subName, token);
-  const members = membersFromAbout || "?";
-
-  let rules = [];
-  const rulesPath = `/r/${encodeURIComponent(name)}/about/rules.json?raw_json=1`;
-  const rulesAttempts = [];
-  if (token) rulesAttempts.push({ base: "https://oauth.reddit.com", token });
-  for (const t of REDDIT_PUBLIC_BASES) rulesAttempts.push({ base: t.base, token: null });
-  for (const { base, token: tk } of rulesAttempts) {
-    try {
-      const res = await fetch(`${base}${rulesPath}`, { headers: buildRedditHeaders(tk) });
-      const rulesData = await readRedditResponse(res);
-      if (!res.ok) continue;
-      const list = rulesData?.rules || rulesData?.data?.rules;
-      if (Array.isArray(list) && list.length) {
-        rules = list.map((r) => r.short_name || r.description || "").filter(Boolean);
-        break;
-      }
-    } catch {}
-  }
-
+  const { posts } = await fetchSubredditPosts(name, token);
+  const firstRaw = posts[0]?._raw || null;
+  const n = parseSubscribersFromAny(firstRaw);
+  const members = n != null ? formatSubscriberCount(n) : "?";
+  const rules = extractRulesFromAny(firstRaw);
   return { members, rules };
 }
 
@@ -741,8 +682,9 @@ async function handleSubredditAboutRequest(req, res) {
   try {
     const rawSub = String(req.method === "GET" ? req.query.sub : req.body?.sub || "").trim();
     if (!rawSub) return res.status(400).json({ error: "Missing subreddit" });
+    if (!getApifyToken()) return res.status(503).json({ error: getApifyTokenError() });
     const sub = rawSub.startsWith("r/") ? rawSub : `r/${rawSub}`;
-    const token = await getRedditToken();
+    const token = null;
     const meta = await fetchSubredditAbout(sub, token);
     res.json({ sub, members: meta.members });
   } catch (err) {
@@ -815,8 +757,9 @@ app.post("/api/intel", async (req, res) => {
   try {
     const rawSub = String(req.body?.sub || "").trim();
     if (!rawSub) return res.status(400).json({ error: "Missing subreddit" });
+    if (!getApifyToken()) return res.status(503).json({ error: getApifyTokenError() });
     const sub = rawSub.startsWith("r/") ? rawSub : `r/${rawSub}`;
-    const token = await getRedditToken();
+    const token = null;
     const { posts, errors } = await fetchSubredditPosts(sub, token);
     const meta = await fetchSubredditAbout(sub, token);
     if (!posts.length) {

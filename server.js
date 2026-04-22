@@ -126,6 +126,12 @@ function getApifyActorId() {
   return String(process.env.APIFY_REDDIT_ACTOR_ID || "apify/reddit-scraper").trim();
 }
 
+function getApifyActorPathId(actorId = getApifyActorId()) {
+  const id = String(actorId || "").trim();
+  if (!id) return "";
+  return id.includes("/") ? id.replace("/", "~") : id;
+}
+
 function getApifyTokenError() {
   return "Missing APIFY_API_TOKEN. Add it in Railway environment variables.";
 }
@@ -158,7 +164,8 @@ async function readJsonOrText(res) {
 function formatRedditHttpError(status, payload) {
   if (payload && typeof payload === "object") {
     if (payload.reason === "private") return `HTTP ${status}: private or restricted subreddit`;
-    const message = payload.message || payload.error_description || payload.reason || payload.error;
+    const nested = payload.error && typeof payload.error === "object" ? payload.error : null;
+    const message = payload.message || payload.error_description || payload.reason || nested?.message || nested?.type || payload.error;
     if (message) return `HTTP ${status}: ${message}`;
   }
   if (typeof payload === "string" && payload.trim()) {
@@ -331,7 +338,8 @@ async function runApifyActor(input) {
   const token = getApifyToken();
   if (!token) throw new Error(getApifyTokenError());
   const actorId = getApifyActorId();
-  const endpoint = `${APIFY_API_BASE}/acts/${encodeURIComponent(actorId)}/run-sync-get-dataset-items`;
+  const actorPathId = getApifyActorPathId(actorId);
+  const endpoint = `${APIFY_API_BASE}/acts/${encodeURIComponent(actorPathId)}/run-sync-get-dataset-items`;
   const qs = new URLSearchParams({ token, clean: "true", format: "json" });
   const res = await fetch(`${endpoint}?${qs.toString()}`, {
     method: "POST",
@@ -603,6 +611,7 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 app.get("/api/test", async (req, res) => {
   const token = getApifyToken();
   const actorId = getApifyActorId();
+  const actorPathId = getApifyActorPathId(actorId);
   if (!token) return res.json({ ok: false, error: getApifyTokenError() });
   try {
     const meRes = await fetch(`${APIFY_API_BASE}/users/me?token=${encodeURIComponent(token)}`);
@@ -615,13 +624,14 @@ app.get("/api/test", async (req, res) => {
       });
     }
 
-    const actorRes = await fetch(`${APIFY_API_BASE}/acts/${encodeURIComponent(actorId)}?token=${encodeURIComponent(token)}`);
+    const actorRes = await fetch(`${APIFY_API_BASE}/acts/${encodeURIComponent(actorPathId)}?token=${encodeURIComponent(token)}`);
     const actorData = await readJsonOrText(actorRes);
     if (!actorRes.ok) {
       return res.json({
         ok: false,
         error: "Apify actor not accessible",
         actorId,
+        actorPathId,
         detail: formatRedditHttpError(actorRes.status, actorData),
       });
     }
@@ -629,6 +639,7 @@ app.get("/api/test", async (req, res) => {
     return res.json({
       ok: true,
       actorId,
+      actorPathId,
       user: meData?.data?.username || meData?.username || "unknown",
       message: "Apify credentials valid",
     });

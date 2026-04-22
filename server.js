@@ -392,39 +392,60 @@ async function runApifyWithInputCandidates(candidates, fallbackError) {
 
 function subredditInputCandidates(subName, limit = 100) {
   const name = normalizeSubredditName(subName);
+  const lower = name.toLowerCase();
+  const subredditUrl = `https://www.reddit.com/r/${lower}/new/`;
   return [
-    { subreddits: [name], maxItems: limit, sort: "new" },
-    { subreddit: name, maxItems: limit, sort: "new" },
-    { startUrls: [`https://www.reddit.com/r/${name}/new/`], maxItems: limit },
-    { searchQueries: [`subreddit:${name}`], maxItems: limit, sort: "new" },
+    { subreddits: [name], maxItems: limit, maxPosts: limit, maxPostCount: limit, sort: "new" },
+    { subreddits: [lower], maxItems: limit, maxPosts: limit, maxPostCount: limit, sort: "new" },
+    { subreddit: name, maxItems: limit, maxPosts: limit, maxPostCount: limit, sort: "new" },
+    { subreddit: lower, maxItems: limit, maxPosts: limit, maxPostCount: limit, sort: "new" },
+    { subreddit: `r/${name}`, maxItems: limit, maxPosts: limit, maxPostCount: limit, sort: "new" },
+    { subreddit: `r/${lower}`, maxItems: limit, maxPosts: limit, maxPostCount: limit, sort: "new" },
+    { startUrls: [{ url: subredditUrl }], maxItems: limit, maxPosts: limit, maxPostCount: limit },
+    { startUrls: [subredditUrl], maxItems: limit, maxPosts: limit, maxPostCount: limit },
+    { searchQueries: [`subreddit:${name}`], maxItems: limit, maxPosts: limit, maxPostCount: limit, sort: "new" },
+    { searchQueries: [`subreddit:${lower}`], maxItems: limit, maxPosts: limit, maxPostCount: limit, sort: "new" },
   ];
 }
 
 function searchInputCandidates(query, limit = 100) {
   return [
-    { searchQueries: [query], maxItems: limit, sort: "relevance" },
-    { query, maxItems: limit, sort: "relevance" },
-    { startUrls: [`https://www.reddit.com/search/?q=${encodeURIComponent(query)}`], maxItems: limit },
+    { searchQueries: [query], maxItems: limit, maxPosts: limit, maxPostCount: limit, sort: "relevance" },
+    { queries: [query], maxItems: limit, maxPosts: limit, maxPostCount: limit, sort: "relevance" },
+    { query, maxItems: limit, maxPosts: limit, maxPostCount: limit, sort: "relevance" },
+    { startUrls: [{ url: `https://www.reddit.com/search/?q=${encodeURIComponent(query)}` }], maxItems: limit, maxPosts: limit, maxPostCount: limit },
+    { startUrls: [`https://www.reddit.com/search/?q=${encodeURIComponent(query)}`], maxItems: limit, maxPosts: limit, maxPostCount: limit },
   ];
 }
 
 async function fetchSubredditPosts(subName, _token) {
   const name = normalizeSubredditName(subName);
-  const { items, actorId, errors } = await runApifyWithInputCandidates(
-    subredditInputCandidates(name, 100),
-    `Apify failed to fetch posts for ${subName}`
-  );
-  const normalized = items
-    .map((item) => normalizeApifyPost(item, name))
-    .filter(Boolean);
-  const deduped = [];
-  const seen = new Set();
-  for (const post of normalized) {
-    if (seen.has(post.id)) continue;
-    seen.add(post.id);
-    deduped.push(post);
+  const errors = [];
+  const statuses = [];
+  const candidates = subredditInputCandidates(name, 100);
+
+  for (const input of candidates) {
+    try {
+      const { items, actorId } = await runApifyActor(input);
+      const normalized = items
+        .map((item) => normalizeApifyPost(item, name))
+        .filter(Boolean);
+      const deduped = [];
+      const seen = new Set();
+      for (const post of normalized) {
+        if (seen.has(post.id)) continue;
+        seen.add(post.id);
+        deduped.push(post);
+      }
+      statuses.push(`apify:${actorId || "unknown"}:${deduped.length}`);
+      if (deduped.length > 0) return { posts: deduped, errors, statuses };
+      errors.push(`${actorId || "unknown"}: actor returned 0 matching post items for input ${JSON.stringify(input).slice(0, 180)}`);
+    } catch (err) {
+      errors.push((err && err.message) || "Apify run failed");
+    }
   }
-  return { posts: deduped, errors, statuses: [`apify:${actorId || "unknown"}:${deduped.length}`] };
+
+  return { posts: [], errors, statuses };
 }
 
 function getRedditCacheKey({ subreddits = [], intentPatterns = [], toolTerms = [], searchAll = false }) {
@@ -478,13 +499,21 @@ function setSubredditCooldown(subName, reason = "empty response") {
 
 // ── Search all of Reddit via Apify ───────────────────────────
 async function searchReddit(query, _token) {
-  const { items } = await runApifyWithInputCandidates(
-    searchInputCandidates(query, 100),
-    "Apify failed to search Reddit"
-  );
-  return items
-    .map((item) => normalizeApifyPost(item))
-    .filter(Boolean);
+  const errors = [];
+  const candidates = searchInputCandidates(query, 100);
+  for (const input of candidates) {
+    try {
+      const { items } = await runApifyActor(input);
+      const normalized = items
+        .map((item) => normalizeApifyPost(item))
+        .filter(Boolean);
+      if (normalized.length > 0) return normalized;
+      errors.push(`Apify returned 0 matching post items for search input ${JSON.stringify(input).slice(0, 180)}`);
+    } catch (err) {
+      errors.push((err && err.message) || "Apify run failed");
+    }
+  }
+  throw new Error(errors.join(" | ") || "Apify failed to search Reddit");
 }
 
 // ── Fetch top comment ────────────────────────────────────────

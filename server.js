@@ -114,9 +114,11 @@ app.put("/api/data", async (req, res) => {
 const REDDIT_RESULT_TTL_MS = 5 * 60 * 1000;
 const SUBREDDIT_EMPTY_TTL_MS = 3 * 60 * 1000;
 const APIFY_API_BASE = "https://api.apify.com/v2";
+const APIFY_REQUEST_TIMEOUT_MS = Math.max(5000, Number(process.env.APIFY_REQUEST_TIMEOUT_MS || 25000));
 const redditResultCache = new Map();
 const subredditCooldowns = new Map();
 const apifyPostCache = new Map();
+let cachedWorkingApifyActorId = null;
 
 function getApifyToken() {
   return String(process.env.APIFY_API_TOKEN || "").trim() || null;
@@ -138,10 +140,20 @@ function getApifyActorCandidates() {
     "trudax/reddit-scraper-lite",
     "apify/reddit-scraper",
   ];
-  const candidates = [configured, ...defaults]
+  const candidates = [cachedWorkingApifyActorId, configured, ...defaults]
     .map((id) => String(id || "").trim())
     .filter(Boolean);
   return Array.from(new Set(candidates));
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = APIFY_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function getApifyTokenError() {
@@ -356,12 +368,22 @@ async function runApifyActor(input) {
     const actorPathId = getApifyActorPathId(actorId);
     const endpoint = `${APIFY_API_BASE}/acts/${encodeURIComponent(actorPathId)}/run-sync-get-dataset-items`;
     const qs = new URLSearchParams({ token, clean: "true", format: "json" });
-    const res = await fetch(`${endpoint}?${qs.toString()}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
-    });
-    const payload = await readJsonOrText(res);
+    let res;
+    let payload;
+    try {
+      res = await fetchWithTimeout(`${endpoint}?${qs.toString()}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      });
+      payload = await readJsonOrText(res);
+    } catch (err) {
+      const msg = err?.name === "AbortError"
+        ? `timeout after ${APIFY_REQUEST_TIMEOUT_MS}ms`
+        : ((err && err.message) || "request failed");
+      errors.push(`${actorId}: ${msg}`);
+      continue;
+    }
     if (!res.ok) {
       const detail = formatRedditHttpError(res.status, payload);
       errors.push(`${actorId}: ${detail}`);
@@ -371,6 +393,7 @@ async function runApifyActor(input) {
       errors.push(`${actorId}: Apify actor returned unexpected response shape`);
       continue;
     }
+    cachedWorkingApifyActorId = actorId;
     return { items: payload, actorId };
   }
 
@@ -424,8 +447,10 @@ async function fetchSubredditPosts(subName, _token) {
   const statuses = [];
   const candidates = subredditInputCandidates(name, 100);
 
-  for (const input of candidates) {
+  for (let i = 0; i < candidates.length; i++) {
+    const input = candidates[i];
     try {
+      console.log(`[reddit] ${subName}: trying input candidate ${i + 1}/${candidates.length}`);
       const { items, actorId } = await runApifyActor(input);
       const normalized = items
         .map((item) => normalizeApifyPost(item, name))
@@ -438,7 +463,10 @@ async function fetchSubredditPosts(subName, _token) {
         deduped.push(post);
       }
       statuses.push(`apify:${actorId || "unknown"}:${deduped.length}`);
-      if (deduped.length > 0) return { posts: deduped, errors, statuses };
+      if (deduped.length > 0) {
+        console.log(`[reddit] ${subName}: fetched ${deduped.length} posts with ${actorId}`);
+        return { posts: deduped, errors, statuses };
+      }
       errors.push(`${actorId || "unknown"}: actor returned 0 matching post items for input ${JSON.stringify(input).slice(0, 180)}`);
     } catch (err) {
       errors.push((err && err.message) || "Apify run failed");
@@ -551,9 +579,13 @@ app.post("/api/reddit", async (req, res) => {
     if (!searchAll && !subreddits.length) return res.json({ threads: [] });
     if (!getApifyToken()) return res.status(503).json({ error: getApifyTokenError() });
 
+    const startedAt = Date.now();
+    console.log(`[reddit] scan started: searchAll=${Boolean(searchAll)} subCount=${subreddits.length}`);
+
     const cacheKey = getRedditCacheKey({ subreddits, intentPatterns, toolTerms, searchAll });
     const cachedResult = getCachedRedditResult(cacheKey);
     if (cachedResult) {
+      console.log("[reddit] cache hit");
       return res.json({
         ...cachedResult,
         debug: `${cachedResult.debug} | Cache: hit`,
@@ -578,6 +610,7 @@ app.post("/api/reddit", async (req, res) => {
     } else {
       for (const sub of subreddits) {
         const subName = sub.name || sub;
+        console.log(`[reddit] fetching subreddit: ${subName}`);
         const cooldown = getSubredditCooldown(subName);
         if (cooldown) {
           fetchErrors.push(`${subName}: cooldown active (${cooldown.reason})`);
@@ -596,6 +629,7 @@ app.post("/api/reddit", async (req, res) => {
             fetchErrors.push(`${subName}: partial fetch (${errors.join(", ")})`);
           }
           allPosts.push(...posts.map((p) => ({ ...p, _sub: sub })));
+          console.log(`[reddit] ${subName}: got ${posts.length} posts`);
         } catch (err) {
           if (String(err.message || "").includes("429")) setSubredditCooldown(subName, err.message);
           fetchErrors.push(`${subName}: ${err.message}`);
@@ -646,6 +680,7 @@ app.post("/api/reddit", async (req, res) => {
 
     const debug = `Fetched ${allPosts.length} posts → ${intentMatched} matched intent → ${toolMatched} matched tool terms → ${threads.length} threads returned` + (fetchErrors.length ? ` | Errors: ${fetchErrors.join("; ")}` : "");
     console.log(debug);
+    console.log(`[reddit] scan finished in ${Date.now() - startedAt}ms`);
     const responseBody = { threads, debug };
     const shouldCache = threads.length > 0 && fetchErrors.length === 0;
     if (shouldCache) setCachedRedditResult(cacheKey, responseBody);

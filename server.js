@@ -441,6 +441,71 @@ function searchInputCandidates(query, limit = 100) {
   ];
 }
 
+async function fetchSubredditPublicApi(subName) {
+  const name = normalizeSubredditName(subName);
+  const errors = [];
+  const headers = { "User-Agent": "SocialScanner/1.0" };
+
+  try {
+    const url = `https://www.reddit.com/r/${name}/new.json?limit=100`;
+    console.log(`[reddit] ${subName}: trying public JSON API`);
+    const res = await fetchWithTimeout(url, { headers }, 15000);
+    if (res.ok) {
+      const data = await readJsonOrText(res);
+      const children = data?.data?.children || [];
+      const posts = children.map((child) => {
+        const p = child.data;
+        if (!p?.id || !p?.title) return null;
+        return {
+          id: p.id,
+          title: p.title,
+          selftext: p.selftext || "",
+          permalink: p.permalink || `/comments/${p.id}`,
+          created_utc: p.created_utc || Math.floor(Date.now() / 1000),
+          author: p.author || "unknown",
+          subreddit: p.subreddit || name,
+          score: p.score ?? null,
+          num_comments: p.num_comments ?? null,
+          _source: "public_api",
+          _topComment: null,
+          _raw: p,
+        };
+      }).filter(Boolean);
+      if (posts.length > 0) {
+        console.log(`[reddit] ${subName}: public JSON API got ${posts.length} posts`);
+        return { posts, errors };
+      }
+      errors.push("public JSON API: returned 0 posts");
+    } else {
+      const payload = await readJsonOrText(res);
+      errors.push(`public JSON API: ${formatRedditHttpError(res.status, payload)}`);
+    }
+  } catch (err) {
+    errors.push(`public JSON API: ${err.message}`);
+  }
+
+  try {
+    const url = `https://www.reddit.com/r/${name}/new/.rss`;
+    console.log(`[reddit] ${subName}: trying public RSS feed`);
+    const res = await fetchWithTimeout(url, { headers }, 15000);
+    if (res.ok) {
+      const text = await res.text();
+      const posts = parseRedditFeedPosts(text, name);
+      if (posts.length > 0) {
+        console.log(`[reddit] ${subName}: RSS feed got ${posts.length} posts`);
+        return { posts, errors };
+      }
+      errors.push("RSS feed: returned 0 posts");
+    } else {
+      errors.push(`RSS feed: HTTP ${res.status}`);
+    }
+  } catch (err) {
+    errors.push(`RSS feed: ${err.message}`);
+  }
+
+  return { posts: [], errors };
+}
+
 async function fetchSubredditPosts(subName, _token) {
   const name = normalizeSubredditName(subName);
   const errors = [];
@@ -469,8 +534,18 @@ async function fetchSubredditPosts(subName, _token) {
       }
       errors.push(`${actorId || "unknown"}: actor returned 0 matching post items for input ${JSON.stringify(input).slice(0, 180)}`);
     } catch (err) {
-      errors.push((err && err.message) || "Apify run failed");
+      const msg = (err && err.message) || "Apify run failed";
+      errors.push(msg);
+      // All Apify actors hit hard rate limit — skip remaining input candidates
+      if (msg.includes("Monthly usage hard limit exceeded")) break;
     }
+  }
+
+  const publicResult = await fetchSubredditPublicApi(name);
+  errors.push(...publicResult.errors);
+  if (publicResult.posts.length > 0) {
+    statuses.push(`public_api:${publicResult.posts.length}`);
+    return { posts: publicResult.posts, errors, statuses };
   }
 
   return { posts: [], errors, statuses };

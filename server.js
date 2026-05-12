@@ -1,5 +1,4 @@
 import express from "express";
-import "dotenv/config";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { existsSync } from "fs";

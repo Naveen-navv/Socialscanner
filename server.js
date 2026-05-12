@@ -1145,4 +1145,15 @@ app.post("/api/intel", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, "0.0.0.0", () => console.log(`SocialScanner running on port ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`SocialScanner running on port ${PORT}`);
+  const anthropicKey = process.env.ANTHROPIC_API_KEY || process.env.VITE_ANTHROPIC_API_KEY;
+  if (!anthropicKey) {
+    console.error("[STARTUP] ❌ ANTHROPIC_API_KEY is NOT SET — AI reply generation will fail");
+  } else if (anthropicKey.length < 20) {
+    console.error(`[STARTUP] ❌ ANTHROPIC_API_KEY looks wrong — only ${anthropicKey.length} chars (expected 100+)`);
+  } else {
+    console.log(`[STARTUP] ✅ ANTHROPIC_API_KEY is set (${anthropicKey.length} chars)`);
+  }
+  console.log(`[STARTUP] APIFY_API_TOKEN: ${process.env.APIFY_API_TOKEN ? "✅ set" : "❌ NOT SET"}`);
+});

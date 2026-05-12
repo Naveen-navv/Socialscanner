@@ -868,10 +868,12 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 
 // ── Env debug ────────────────────────────────────────────────
 app.get("/api/debug-env", (req, res) => {
+  const allKeys = Object.keys(process.env).sort();
   res.json({
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ? `set (${process.env.ANTHROPIC_API_KEY.length} chars)` : "NOT SET",
     APIFY_API_TOKEN: process.env.APIFY_API_TOKEN ? "set" : "NOT SET",
     NODE_ENV: process.env.NODE_ENV || "not set",
+    allEnvKeys: allKeys,
   });
 });
 

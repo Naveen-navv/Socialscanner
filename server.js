@@ -869,11 +869,13 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 // ── Env debug ────────────────────────────────────────────────
 app.get("/api/debug-env", (req, res) => {
   const allKeys = Object.keys(process.env).sort();
+  const resolvedKey = process.env.ANTHROPIC_API_KEY || process.env.VITE_ANTHROPIC_API_KEY;
   res.json({
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ? `set (${process.env.ANTHROPIC_API_KEY.length} chars)` : "NOT SET",
+    VITE_ANTHROPIC_API_KEY: process.env.VITE_ANTHROPIC_API_KEY ? `set (${process.env.VITE_ANTHROPIC_API_KEY.length} chars)` : "NOT SET",
+    resolvedKey: resolvedKey ? `ready (${resolvedKey.length} chars)` : "MISSING — AI will not work",
     APIFY_API_TOKEN: process.env.APIFY_API_TOKEN ? "set" : "NOT SET",
     NODE_ENV: process.env.NODE_ENV || "not set",
-    allEnvKeys: allKeys,
   });
 });
 

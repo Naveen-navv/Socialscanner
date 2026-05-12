@@ -1039,7 +1039,7 @@ app.post("/api/subreddit-about", handleSubredditAboutRequest);
 
 // ── Anthropic proxy (keeps API key server-side) ───────────────
 app.post("/api/anthropic", async (req, res) => {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.ANTHROPIC_API_KEY || process.env.VITE_ANTHROPIC_API_KEY;
   if (!apiKey) return res.status(503).json({ error: "ANTHROPIC_API_KEY not configured on server. Add it in Railway environment variables." });
   const { model = "claude-sonnet-4-6", max_tokens = 1000, messages } = req.body;
   if (!Array.isArray(messages) || !messages.length) return res.status(400).json({ error: "Missing messages" });

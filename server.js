@@ -1126,11 +1126,9 @@ app.post("/api/intel", async (req, res) => {
   try {
     const rawSub = String(req.body?.sub || "").trim();
     if (!rawSub) return res.status(400).json({ error: "Missing subreddit" });
-    if (!getApifyToken()) return res.status(503).json({ error: getApifyTokenError() });
     const sub = rawSub.startsWith("r/") ? rawSub : `r/${rawSub}`;
-    const token = null;
     const directMeta = await fetchSubredditAboutDirect(sub);
-    const { posts, errors } = await fetchSubredditPosts(sub, token);
+    const { posts, errors } = await fetchSubredditPublicApi(sub);
     const meta = directMeta || deriveMetaFromPosts(posts);
     if (!posts.length) {
       const detail = errors.length ? ` (${errors.join(", ")})` : "";

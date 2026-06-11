@@ -328,7 +328,8 @@ function extractSubredditFromUrl(url) {
 }
 
 function extractPermalink(item) {
-  if (typeof item?.permalink === "string" && item.permalink.trim()) return item.permalink;
+  const raw = typeof item?.permalink === "string" ? item.permalink.trim() : "";
+  if (raw) return raw.replace(/^https?:\/\/(?:www\.|old\.)?reddit\.com/i, "");
   const url = String(item?.url || item?.postUrl || item?.link || "").trim();
   if (!url) return "";
   try {
@@ -1127,8 +1128,22 @@ app.post("/api/intel", async (req, res) => {
     const rawSub = String(req.body?.sub || "").trim();
     if (!rawSub) return res.status(400).json({ error: "Missing subreddit" });
     const sub = rawSub.startsWith("r/") ? rawSub : `r/${rawSub}`;
+    const name = sub.replace(/^r\//i, "");
     const directMeta = await fetchSubredditAboutDirect(sub);
-    const { posts, errors } = await fetchSubredditPublicApi(sub);
+    let { posts, errors } = await fetchSubredditPublicApi(sub);
+    if (!posts.length && getApifyToken()) {
+      try {
+        const { items } = await runApifyActor({
+          urls: [`https://www.reddit.com/r/${name.toLowerCase()}/`],
+          maxPostsPerSource: 50,
+          includeComments: false,
+          outputFormat: "default",
+        });
+        posts = (items || []).map((item) => normalizeApifyPost(item, name)).filter(Boolean);
+      } catch (e) {
+        errors.push(`Apify fallback: ${e.message}`);
+      }
+    }
     const meta = directMeta || deriveMetaFromPosts(posts);
     if (!posts.length) {
       const detail = errors.length ? ` (${errors.join(", ")})` : "";

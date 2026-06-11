@@ -322,23 +322,8 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
   );
 
   const threadMatchesActiveConfig = (thread: any) => {
-    if (normalizedToolTerms.length > 0) {
-      const text = `${thread?.title || ""} ${thread?.body || ""} ${thread?.replyTo?.text || ""}`.toLowerCase();
-      if (!normalizedToolTerms.some((term) => text.includes(term))) return false;
-    }
-
     const matchingFocusAreas = fa.filter((focus) => focusAreaMatchesThread(focus, thread, searchAll));
-    if (!matchingFocusAreas.length) return false;
-
-    const storedFocusAreaId = String(thread?.focusAreaId || "");
-    if (storedFocusAreaId) {
-      return matchingFocusAreas.some((focus) => String(focus.id || "") === storedFocusAreaId);
-    }
-
-    const storedIntentDescription = String(thread?.intentFilterDescription || "");
-    if (!storedIntentDescription) return true;
-
-    return matchingFocusAreas.some((focus) => String(focus.intentDescription || "") === storedIntentDescription);
+    return matchingFocusAreas.length > 0;
   };
 
   const visibleThreads = useMemo(() => {

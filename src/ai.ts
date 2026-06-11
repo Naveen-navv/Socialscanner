@@ -1,4 +1,4 @@
-export const genReplyAI = async (thread: any, tone: string, len: string, brandVoice: string, intelData: any) => {
+export const genReplyAI = async (thread: any, tone: string, len: string, brandVoice: string, intelData: any, responseStrategy?: string) => {
 
   const toneGuide = { helpful: "Be friendly, informative, and genuinely helpful. Share personal experience.", casual: "Be conversational and relatable. Use casual language like you're chatting with a friend.", expert: "Be authoritative with specific data points and structured advice. Show deep knowledge.", subtle: "Be completely natural. Mention the product only if it fits organically. No pitch feel at all." }[tone] || "";
   const lenGuide = { short: "Keep it under 60 words. One concise paragraph.", medium: "2-3 paragraphs, around 100-150 words.", long: "Detailed response with sections/bullet points, 200-300 words." }[len] || "";
@@ -15,9 +15,7 @@ export const genReplyAI = async (thread: any, tone: string, len: string, brandVo
 - NEVER use these words: ${intelData.keywords.negative.join(", ")}`;
   }
 
-  const prompt = `You are writing a Reddit reply for a personal finance app called Kedil (kedil.money). Kedil helps users in India with budgeting, expense tracking, UPI transaction categorization, and financial discipline.
-
-THREAD TO REPLY TO:
+  const userPrompt = `THREAD TO REPLY TO:
 Title: ${thread.title}
 Subreddit: ${thread.sub}
 Post: ${thread.body}
@@ -26,20 +24,20 @@ ${thread._replyTarget === "comment" && thread.replyTo ? `\nYOU ARE REPLYING TO T
 TONE: ${tone} — ${toneGuide}
 LENGTH: ${len} — ${lenGuide}
 ${intelContext}
+${brandVoice ? `\nBRAND VOICE & CONTEXT:\n${brandVoice}` : ""}`;
 
-CRITICAL RULES:
-- ${brandVoice ? "HIGHEST PRIORITY: Follow the Brand Voice guidelines below EXACTLY. They override all other instructions." : "Write as a real Reddit user, NOT as a brand account. Frame as personal experience."}
-- Match the subreddit's culture and tone
-- Never sound like a generic ad
-- Use markdown formatting if the length is "long"
-- Do NOT include any preamble — just the reply text directly
-${brandVoice ? `\nBRAND VOICE (MUST FOLLOW — THIS OVERRIDES ALL OTHER RULES):\n${brandVoice}` : ""}`;
+  const messages: any[] = [];
+  if (responseStrategy?.trim()) {
+    messages.push({ role: "user", content: responseStrategy.trim() });
+    messages.push({ role: "assistant", content: "Understood. I will follow this response strategy for every reply. Send me the thread details." });
+  }
+  messages.push({ role: "user", content: userPrompt });
 
   try {
     const res = await fetch("/api/anthropic", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, messages }),
     });
     const data = await res.json();
     if (!res.ok) {

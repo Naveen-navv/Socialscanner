@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { C, SUBS_DB, DEF_FA, DEF_THREADS, DEF_TOOL_TERMS, DEF_METRICS, DEF_INTEL, TONES } from "./constants";
+import { C, SUBS_DB, DEF_FA, DEF_THREADS, DEF_TOOL_TERMS, DEF_RESPONSE_STRATEGY, DEF_METRICS, DEF_INTEL, TONES } from "./constants";
 import { filterByIntent, genReplyAI, genReplyFallback, generateSearchKeywords } from "./ai";
 
 const Badge = ({ children, color = C.accent, onRemove }: { children: React.ReactNode; color?: string; onRemove?: () => void }) => (
@@ -152,6 +152,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
   const [toolTerms, setToolTerms] = useState<string[]>(DEF_TOOL_TERMS);
   const [negativeKeywords, setNegativeKeywords] = useState<string[]>([]);
   const [searchAll, setSearchAll] = useState(false);
+  const [responseStrategy, setResponseStrategy] = useState(DEF_RESPONSE_STRATEGY);
   const [testPostText, setTestPostText] = useState("");
   const [testLoading, setTestLoading] = useState(false);
   const [testResult, setTestResult] = useState<any | null>(null);
@@ -285,6 +286,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     const loadedNegKeywords = data?.negativeKeywords || [];
     const loadedSearchAll = data?.searchAll || false;
     const loadedIntel = (data?.intel || DEF_INTEL).map(normalizeIntelEntry);
+    const loadedResponseStrategy = data?.responseStrategy || DEF_RESPONSE_STRATEGY;
 
     setFa(loadedFa);
     setThreads(loadedThreads);
@@ -295,6 +297,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     setToolTerms(loadedToolTerms);
     setNegativeKeywords(loadedNegKeywords);
     setSearchAll(loadedSearchAll);
+    setResponseStrategy(loadedResponseStrategy);
 
     return { loadedFa, loadedThreads, loadedToolTerms, loadedSearchAll, loadedIntel };
   };
@@ -653,18 +656,18 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       return;
     }
     if (timer.current) clearTimeout(timer.current);
-    const snapshot = { fa, threads, ec, metrics, bm, intel, toolTerms, negativeKeywords, searchAll };
+    const snapshot = { fa, threads, ec, metrics, bm, intel, toolTerms, negativeKeywords, searchAll, responseStrategy };
     const localSnapshot = saveLocalSnapshot(snapshot);
     timer.current = setTimeout(() => { void persistSnapshot(localSnapshot); }, 800);
     return () => { if (timer.current) clearTimeout(timer.current); };
-  }, [fa, threads, ec, metrics, bm, intel, toolTerms, negativeKeywords, searchAll, dataLoaded]);
+  }, [fa, threads, ec, metrics, bm, intel, toolTerms, negativeKeywords, searchAll, responseStrategy, dataLoaded]);
 
   useEffect(() => {
     if (!activeThread || activeThread.reply || activeThread.status === "posted") return;
     const si = intel.find((s: any) => s.sub === activeThread.sub);
     const target: "comment" | "post" = activeThread.replyTo ? "comment" : "post";
     setAiLoading(true);
-    genReplyAI({ ...activeThread, _replyTarget: target }, ec.tone, ec.length, ec.bv, si).then(result => {
+    genReplyAI({ ...activeThread, _replyTarget: target }, ec.tone, ec.length, ec.bv, si, responseStrategy).then(result => {
       setDraftText(result || genReplyFallback(activeThread, ec.tone, ec.length, target));
       setAiLoading(false);
     });
@@ -993,7 +996,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       const useTarget = target ?? replyTarget;
       setAiLoading(true);
       const si = intel.find(s => s.sub === t.sub);
-      const aiResult = await genReplyAI({ ...t, _replyTarget: useTarget }, useTone, useLen, ec.bv, si);
+      const aiResult = await genReplyAI({ ...t, _replyTarget: useTarget }, useTone, useLen, ec.bv, si, responseStrategy);
       setDraftText(aiResult || genReplyFallback(t, useTone, useLen, useTarget));
       setAiLoading(false);
     };
@@ -1115,6 +1118,14 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
 
 
       {settingsTab === "intelligence" && <>
+        <div style={{ background: C.card, borderRadius: 12, padding: 20, marginBottom: 16, border: `1px solid ${C.border}` }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: C.accent, textTransform: "uppercase", letterSpacing: 1 }}>Response Strategy</div>
+            <span style={{ fontSize: 10, color: C.muted, cursor: "pointer" }} onClick={() => setResponseStrategy(DEF_RESPONSE_STRATEGY)}>Reset to default</span>
+          </div>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>System-level instructions that shape every AI reply. Subreddit intelligence and brand voice are layered on top.</div>
+          <textarea value={responseStrategy} onChange={e => setResponseStrategy(e.target.value)} style={{ width: "100%", padding: "10px 14px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 12, minHeight: 200, resize: "vertical", boxSizing: "border-box", fontFamily: "inherit", lineHeight: 1.5 }} />
+        </div>
         <div style={{ background: `${C.purple}10`, borderRadius: 10, padding: 16, marginBottom: 16, border: `1px solid ${C.purple}25` }}>
           <div style={{ fontSize: 12, color: C.purple, fontWeight: 700, marginBottom: 8 }}>How Intelligence Agent works</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12 }}>{[{ i: "1", l: "Reads rules", d: "Scrapes sidebar" }, { i: "2", l: "Analyzes patterns", d: "What gets upvoted" }, { i: "3", l: "Tracks timing", d: "Best hours" }, { i: "4", l: "Learns daily", d: "Updates on shifts" }].map(s => <div key={s.l} style={{ textAlign: "center" }}><div style={{ fontSize: 20, marginBottom: 4 }}>{s.i}</div><div style={{ fontSize: 12, color: C.text, fontWeight: 600 }}>{s.l}</div><div style={{ fontSize: 11, color: C.muted }}>{s.d}</div></div>)}</div>

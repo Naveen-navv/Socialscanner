@@ -12,14 +12,7 @@ export const DEF_FA = [
 
 export const DEF_THREADS: any[] = [];
 
-export const DEF_TOOL_TERMS = [
-  "budgeting app", "expense tracker", "spending tracker", "money tracking app",
-  "personal finance app", "budget planner", "money management app",
-  "UPI tracking", "UPI expense", "track UPI", "net worth tracker",
-  "auto categorization", "expense categorization", "bank sync",
-  "YNAB", "Mint", "Walnut", "Fi Money", "Jupiter", "Goodbudget",
-  "track my expenses", "track spending", "monthly budget",
-];
+export const DEF_TOOL_TERMS: string[] = [];
 
 export const DEF_METRICS = [
   { id: "traffic", name: "Website Traffic", value: "2,847", change: "+23%", trend: "up", icon: "🌐", data: [120,135,142,155,168,180,195,210,225,240,260,285] },

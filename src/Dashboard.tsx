@@ -1173,7 +1173,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
             if (!faSubs.has(si.sub)) displayList.push(si);
           }
           return <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 14 }}>{displayList.map(si => <div key={si.id} onClick={() => { if (si.id.startsWith("stub_")) return; setSelIntel(si.id); }} style={{ background: C.card, borderRadius: 12, padding: 18, cursor: si.id.startsWith("stub_") ? "default" : "pointer", border: `1px solid ${C.border}`, borderLeft: `4px solid ${si.scanStatus === "failed" ? C.danger : si.scanStatus === "scanning" ? C.accent : si.confidence >= 80 ? C.green : si.confidence >= 50 ? C.warn : C.muted}`, transition: "transform 0.15s", position: "relative", opacity: si.id.startsWith("stub_") ? 0.7 : 1 }} onMouseEnter={e => { if (!si.id.startsWith("stub_")) e.currentTarget.style.transform = "translateY(-2px)"; }} onMouseLeave={e => (e.currentTarget.style.transform = "none")}>
-          {!si.id.startsWith("stub_") && <button
+          <button
             type="button"
             onClick={(e) => {
               e.preventDefault();
@@ -1186,12 +1186,12 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
             onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.3")}
           >
             x
-          </button>}
+          </button>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}><div><div style={{ fontSize: 17, fontWeight: 700, color: C.text }}>{si.sub}</div><div style={{ fontSize: 12, color: C.muted }}>{si.members}  {si.lastScanned}</div></div><div style={{ textAlign: "right" }}><div style={{ fontSize: 20, fontWeight: 800, color: si.confidence >= 80 ? C.green : si.confidence >= 50 ? C.warn : C.muted }}>{si.confidence}%</div><div style={{ fontSize: 10, color: C.muted }}>confidence</div></div></div>
           
           <div style={{ fontSize: 11, marginBottom: 10, color: si.scanStatus === "failed" ? C.danger : si.scanStatus === "scanning" ? C.accent : C.green }}>
             {si.scanStatus === "scanning" ? (si.scanMessage || "Analyzing...") : si.scanStatus === "failed" ? (si.scanMessage || "Analysis failed.") : si.id.startsWith("stub_") ? "Ready to scan" : "Analysis complete"}
-            {(si.scanStatus === "failed" || si.id.startsWith("stub_")) && <button onClick={e => { e.stopPropagation(); void quickScanIntel(si.id, si.sub); }} style={{ marginLeft: 8, background: "transparent", color: si.scanStatus === "failed" ? C.danger : C.accent, border: `1px solid ${si.scanStatus === "failed" ? C.danger : C.accent}55`, borderRadius: 6, padding: "2px 8px", cursor: "pointer", fontSize: 10 }}>{si.scanStatus === "failed" ? "Retry" : "Scan Now"}</button>}
+            {(si.scanStatus === "failed" || si.id.startsWith("stub_")) && <button onClick={e => { e.stopPropagation(); if (si.id.startsWith("stub_")) { addIntelSubreddit(si.sub, si.members); } else { void quickScanIntel(si.id, si.sub); } }} style={{ marginLeft: 8, background: "transparent", color: si.scanStatus === "failed" ? C.danger : C.accent, border: `1px solid ${si.scanStatus === "failed" ? C.danger : C.accent}55`, borderRadius: 6, padding: "2px 8px", cursor: "pointer", fontSize: 10 }}>{si.scanStatus === "failed" ? "Retry" : "Scan Now"}</button>}
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}><div style={{ background: C.bg, borderRadius: 6, padding: "6px 8px", textAlign: "center" }}><div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{si.rules.length}</div><div style={{ fontSize: 10, color: C.muted }}>rules</div></div><div style={{ background: C.bg, borderRadius: 6, padding: "6px 8px", textAlign: "center" }}><div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{si.whatWorks.length}</div><div style={{ fontSize: 10, color: C.muted }}>insights</div></div><div style={{ background: C.bg, borderRadius: 6, padding: "6px 8px", textAlign: "center" }}><div style={{ fontSize: 14, fontWeight: 700, color: si.modStrictness >= 75 ? C.danger : C.warn }}>{si.modStrictness}%</div><div style={{ fontSize: 10, color: C.muted }}>strict</div></div></div>

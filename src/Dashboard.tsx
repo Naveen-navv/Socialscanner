@@ -449,6 +449,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
                   score: incoming.score,
                   comments: incoming.comments,
                   createdUtc: incoming.createdUtc,
+                  timeUnknown: incoming.createdUtc ? false : existing.timeUnknown,
                   time: incoming.time,
                   intent: incoming.intent,
                   matchedPattern: incoming.matchedPattern,
@@ -675,7 +676,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
   // so this is their only chance to be corrected.
   useEffect(() => {
     if (!dataLoaded || backfilledTimesRef.current) return;
-    const stale = threads.filter((t: any) => t?.id && !t.createdUtc);
+    const stale = threads.filter((t: any) => t?.id && !t.createdUtc && !t.timeUnknown);
     if (!stale.length) return;
     backfilledTimesRef.current = true;
     void (async () => {
@@ -690,9 +691,10 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
         setThreads(prev => prev.map((t: any) => {
           if (!t?.id || t.createdUtc) return t;
           if (times[t.id]) return { ...t, createdUtc: times[t.id] };
-          // Reddit no longer has the post, so its saved age can neither be
-          // trusted nor repaired — show nothing rather than a stale number.
-          return t.time ? { ...t, time: "" } : t;
+          // The post is gone from Reddit, so its saved age can neither be
+          // trusted nor repaired — show nothing rather than a stale number, and
+          // remember we tried so later loads don't pay for the lookup again.
+          return { ...t, time: "", timeUnknown: true };
         }));
       } catch {
         // Lookup failed — leave the saved values untouched.

@@ -19,6 +19,42 @@ export function buildInfoUrl(ids = []) {
   return `https://www.reddit.com/api/info.json?id=${fullnames.join(",")}`;
 }
 
+// Apify input shapes for looking posts up by their permalink. Used when
+// Reddit's own API refuses the request — it blocks datacenter IPs, so the
+// server cannot reach it directly from Railway.
+export function postUrlInputCandidates(urls = []) {
+  const list = normalizePostUrls(urls);
+  if (!list.length) return [];
+  return [
+    {
+      urls: list,
+      maxPostsPerSource: list.length,
+      includeComments: false,
+      filterKeywords: [],
+      filterKeywordMode: "any",
+      outputFormat: "default",
+    },
+    {
+      startUrls: list.map((url) => ({ url })),
+      maxPostsPerSource: list.length,
+      includeComments: false,
+      outputFormat: "default",
+    },
+  ];
+}
+
+// Apify's scraper rejects bare names and non-canonical hosts, so send full
+// www.reddit.com permalinks only.
+export function normalizePostUrls(urls = []) {
+  const seen = new Set();
+  for (const raw of urls) {
+    const url = String(raw || "").trim();
+    if (!/^https?:\/\/[^/]*reddit\.com\/.+\/comments\/[a-z0-9]+/i.test(url)) continue;
+    seen.add(url.replace(/^https?:\/\/(?:www\.|old\.)?reddit\.com/i, "https://www.reddit.com"));
+  }
+  return [...seen].slice(0, REDDIT_INFO_MAX_IDS);
+}
+
 // { [postId]: createdUtcSeconds } for every listing child that carries a usable
 // date. Posts Reddit no longer knows about are simply absent.
 export function extractCreatedTimes(payload) {

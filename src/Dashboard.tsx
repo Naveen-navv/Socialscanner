@@ -683,7 +683,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
         const res = await fetch("/api/post-times", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ids: stale.map((t: any) => t.id) }),
+          body: JSON.stringify({ posts: stale.map((t: any) => ({ id: t.id, url: t.url })) }),
         });
         if (!res.ok) return;
         const { times = {} } = await res.json();

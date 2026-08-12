@@ -4,7 +4,7 @@ import { dirname, join } from "path";
 import { existsSync } from "fs";
 import pg from "pg";
 import { parseUtcSeconds, formatTimeAgo } from "./src/time.js";
-import { buildInfoUrl, extractCreatedTimes } from "./src/reddit-info.js";
+import { buildInfoUrl, extractCreatedTimes, postUrlInputCandidates } from "./src/reddit-info.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -736,7 +736,7 @@ async function fetchPostSnapshot(postId, token) {
 
 // Look up creation times for posts we already hold but have no timestamp for.
 // Reddit accepts up to 100 fullnames (t3_<id>) per /api/info call.
-async function fetchPostCreatedTimes(postIds = []) {
+async function fetchPostCreatedTimesDirect(postIds = []) {
   const url = buildInfoUrl(postIds);
   if (!url) return {};
 
@@ -744,6 +744,47 @@ async function fetchPostCreatedTimes(postIds = []) {
   if (!res.ok) throw new Error(`Reddit info lookup failed: HTTP ${res.status}`);
 
   return extractCreatedTimes(await readJsonOrText(res));
+}
+
+// Same lookup through Apify, which reaches Reddit from its own IPs. One actor
+// run covers the whole batch.
+async function fetchPostCreatedTimesViaApify(postUrls = []) {
+  const candidates = postUrlInputCandidates(postUrls);
+  if (!candidates.length) return {};
+  if (!getApifyToken()) throw new Error(getApifyTokenError());
+
+  const { items } = await runApifyWithInputCandidates(candidates, "Apify post lookup failed");
+  const times = {};
+  for (const item of items || []) {
+    const post = normalizeApifyPost(item);
+    const utc = parseUtcSeconds(post?.created_utc);
+    if (post?.id && utc !== null) times[post.id] = utc;
+  }
+  return times;
+}
+
+// Reddit first (free and instant); Apify only for whatever is still missing.
+async function fetchPostCreatedTimes(posts = []) {
+  const ids = posts.map((p) => p?.id).filter(Boolean);
+  const attempts = [];
+
+  let times = {};
+  try {
+    times = await fetchPostCreatedTimesDirect(ids);
+  } catch (err) {
+    attempts.push(`reddit: ${err.message}`);
+  }
+
+  const unresolved = posts.filter((p) => p?.id && p?.url && !times[p.id]);
+  if (unresolved.length) {
+    try {
+      Object.assign(times, await fetchPostCreatedTimesViaApify(unresolved.map((p) => p.url)));
+    } catch (err) {
+      attempts.push(`apify: ${err.message}`);
+    }
+  }
+
+  return { times, attempts };
 }
 
 // ── POST /api/reddit ─────────────────────────────────────────
@@ -879,14 +920,25 @@ app.post("/api/reddit", async (req, res) => {
 // however long ago that scan was.
 app.post("/api/post-times", async (req, res) => {
   try {
-    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
-    if (!ids.length) return res.json({ times: {} });
-    const times = await fetchPostCreatedTimes(ids);
-    console.log(`[reddit] backfilled created times for ${Object.keys(times).length}/${ids.length} posts`);
+    // `posts` carries the permalink so the Apify fallback can be used; `ids`
+    // alone is still accepted.
+    const posts = Array.isArray(req.body?.posts)
+      ? req.body.posts
+      : (Array.isArray(req.body?.ids) ? req.body.ids.map((id) => ({ id })) : []);
+    if (!posts.length) return res.json({ times: {} });
+
+    const { times, attempts } = await fetchPostCreatedTimes(posts);
+    const found = Object.keys(times).length;
+    console.log(`[reddit] backfilled created times for ${found}/${posts.length} posts${attempts.length ? ` | ${attempts.join("; ")}` : ""}`);
+    if (!found && attempts.length) {
+      // Every lookup route failed, so the client must not treat the missing
+      // entries as "post is gone".
+      return res.status(502).json({ error: "Failed to look up post times", detail: attempts.join("; "), times: {} });
+    }
     res.json({ times });
   } catch (err) {
     console.warn("post-times lookup failed:", err.message);
-    res.status(502).json({ error: "Failed to look up post times", times: {} });
+    res.status(502).json({ error: "Failed to look up post times", detail: err.message, times: {} });
   }
 });
 

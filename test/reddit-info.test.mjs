@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { normalizePostIds, buildInfoUrl, extractCreatedTimes } from "../src/reddit-info.js";
+import { normalizePostIds, buildInfoUrl, extractCreatedTimes, normalizePostUrls, postUrlInputCandidates } from "../src/reddit-info.js";
 import { formatTimeAgo } from "../src/time.js";
 
 // Shape of a real https://www.reddit.com/api/info.json?id=t3_... response,
@@ -58,6 +58,35 @@ test("extractCreatedTimes tolerates an empty or malformed payload", () => {
   assert.deepEqual(extractCreatedTimes(null), {});
   assert.deepEqual(extractCreatedTimes({}), {});
   assert.deepEqual(extractCreatedTimes({ data: { children: null } }), {});
+});
+
+test("normalizePostUrls canonicalises hosts and drops non-post links", () => {
+  assert.deepEqual(
+    normalizePostUrls([
+      "https://reddit.com/r/IndiaFinance/comments/1u69v67/need_advice/",
+      "https://old.reddit.com/r/x/comments/abc123/title/",
+      "https://www.reddit.com/r/IndiaFinance/",
+      "IndiaFinance",
+      "",
+    ]),
+    [
+      "https://www.reddit.com/r/IndiaFinance/comments/1u69v67/need_advice/",
+      "https://www.reddit.com/r/x/comments/abc123/title/",
+    ],
+  );
+});
+
+test("postUrlInputCandidates offers both accepted Apify input shapes", () => {
+  const candidates = postUrlInputCandidates(["https://reddit.com/r/x/comments/abc123/title/"]);
+  assert.equal(candidates.length, 2);
+  assert.deepEqual(candidates[0].urls, ["https://www.reddit.com/r/x/comments/abc123/title/"]);
+  assert.deepEqual(candidates[1].startUrls, [{ url: "https://www.reddit.com/r/x/comments/abc123/title/" }]);
+  assert.equal(candidates[0].includeComments, false);
+});
+
+test("postUrlInputCandidates returns nothing when no permalink is usable", () => {
+  assert.deepEqual(postUrlInputCandidates([]), []);
+  assert.deepEqual(postUrlInputCandidates(["not-a-url"]), []);
 });
 
 // End-to-end shape of the repair: a lead stuck on "5d ago" gets its absolute

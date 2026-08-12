@@ -1,6 +1,11 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { C, SUBS_DB, DEF_FA, DEF_THREADS, DEF_TOOL_TERMS, DEF_RESPONSE_STRATEGY, DEF_METRICS, DEF_INTEL, TONES } from "./constants";
 import { filterByIntent, genReplyAI, genReplyFallback, generateSearchKeywords } from "./ai";
+import { formatTimeAgo } from "./time";
+
+// Post age is rendered here, never stored. A relative string saved with the
+// lead would keep reporting the age it had on scan day.
+const threadAge = (t: any) => formatTimeAgo(t?.createdUtc) || t?.time || "";
 
 const Badge = ({ children, color = C.accent, onRemove }: { children: React.ReactNode; color?: string; onRemove?: () => void }) => (
   <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, padding: "4px 10px", borderRadius: 6, background: `${color}18`, color, border: `1px solid ${color}35`, fontWeight: 500 }}>
@@ -137,6 +142,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
   const pendingSave = useRef(false);
   const snapshotRef = useRef<any>(null);
   const hasHydratedRef = useRef(false);
+  const backfilledTimesRef = useRef(false);
 
   const [fa, setFa] = useState<any[]>([]); const [threads, setThreads] = useState<any[]>([]); const [ec, setEc] = useState({ tone: "helpful", length: "medium", bv: "" }); const [metrics, setMetrics] = useState<any[]>([]); const [bm, setBm] = useState<any[]>([]); const [intel, setIntel] = useState<any[]>([]);
 
@@ -442,6 +448,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
                   subMembers: incoming.subMembers,
                   score: incoming.score,
                   comments: incoming.comments,
+                  createdUtc: incoming.createdUtc,
                   time: incoming.time,
                   intent: incoming.intent,
                   matchedPattern: incoming.matchedPattern,
@@ -661,6 +668,37 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     timer.current = setTimeout(() => { void persistSnapshot(localSnapshot); }, 800);
     return () => { if (timer.current) clearTimeout(timer.current); };
   }, [fa, threads, ec, metrics, bm, intel, toolTerms, negativeKeywords, searchAll, responseStrategy, dataLoaded]);
+
+  // One-time repair for leads saved before the server started sending
+  // createdUtc. They only carry the relative string rendered on scan day, so
+  // ask Reddit for the real creation time. Old posts never come back in a scan,
+  // so this is their only chance to be corrected.
+  useEffect(() => {
+    if (!dataLoaded || backfilledTimesRef.current) return;
+    const stale = threads.filter((t: any) => t?.id && !t.createdUtc);
+    if (!stale.length) return;
+    backfilledTimesRef.current = true;
+    void (async () => {
+      try {
+        const res = await fetch("/api/post-times", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: stale.map((t: any) => t.id) }),
+        });
+        if (!res.ok) return;
+        const { times = {} } = await res.json();
+        setThreads(prev => prev.map((t: any) => {
+          if (!t?.id || t.createdUtc) return t;
+          if (times[t.id]) return { ...t, createdUtc: times[t.id] };
+          // Reddit no longer has the post, so its saved age can neither be
+          // trusted nor repaired — show nothing rather than a stale number.
+          return t.time ? { ...t, time: "" } : t;
+        }));
+      } catch {
+        // Lookup failed — leave the saved values untouched.
+      }
+    })();
+  }, [dataLoaded, threads]);
 
   useEffect(() => {
     if (!activeThread || activeThread.reply || activeThread.status === "posted") return;
@@ -969,7 +1007,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       {fl.map(t => <div key={t.id} onClick={() => { const defaultTarget: "comment" | "post" = t.replyTo ? "comment" : "post"; setReplyTarget(defaultTarget); setActiveThread(t); setDraftText(t.reply || genReplyFallback(t, ec.tone, ec.length, defaultTarget)); }} style={{ background: C.card, borderRadius: 10, padding: "16px 18px", marginBottom: 8, border: `1px solid ${C.border}`, cursor: "pointer", transition: "border-color 0.15s" }} onMouseEnter={e => (e.currentTarget.style.borderColor = C.accent)} onMouseLeave={e => (e.currentTarget.style.borderColor = C.border)}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 200 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}><Badge color={C.blue}>{t.sub}</Badge><Badge color={t.intent === "High" ? C.green : C.warn}>{t.intent}</Badge><Badge color={C.purple}>{t.matchedPattern}</Badge>{t.status === "posted" && <Badge color={C.green}> Posted</Badge>}<span style={{ fontSize: 11, color: C.muted }}>{t.time}</span></div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}><Badge color={C.blue}>{t.sub}</Badge><Badge color={t.intent === "High" ? C.green : C.warn}>{t.intent}</Badge><Badge color={C.purple}>{t.matchedPattern}</Badge>{t.status === "posted" && <Badge color={C.green}> Posted</Badge>}<span style={{ fontSize: 11, color: C.muted }}>{threadAge(t)}</span></div>
             {!!t.focusAreaName && <div style={{ fontSize: 12, color: C.accent, marginBottom: 6 }}>From Monitor setup: {t.focusAreaName}</div>}
             <div style={{ fontSize: 14, color: C.text, fontWeight: 600, lineHeight: 1.4, marginBottom: 4 }}>{t.title}</div>
             <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{t.body}</div>
@@ -1011,7 +1049,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
       <div style={{ background: C.card, borderRadius: 12, padding: "14px 20px", marginBottom: 16, border: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0 }}>
           <button onClick={() => setActiveThread(null)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 14, flexShrink: 0 }}>{"<-"}</button>
-          <div style={{ minWidth: 0 }}><div style={{ fontSize: 15, fontWeight: 700, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div><div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}><Badge color={C.blue}>{t.sub}</Badge>{t.focusAreaName && <Badge color={C.accent}>Monitor: {t.focusAreaName}</Badge>}<span style={{ fontSize: 11, color: C.muted }}>{[t.author, threadStatsText, t.time].filter(Boolean).join(" | ")}</span></div></div>
+          <div style={{ minWidth: 0 }}><div style={{ fontSize: 15, fontWeight: 700, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div><div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}><Badge color={C.blue}>{t.sub}</Badge>{t.focusAreaName && <Badge color={C.accent}>Monitor: {t.focusAreaName}</Badge>}<span style={{ fontSize: 11, color: C.muted }}>{[t.author, threadStatsText, threadAge(t)].filter(Boolean).join(" | ")}</span></div></div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>{isP ? <Badge color={C.green}> Posted</Badge> : <Badge color={C.warn}>Draft</Badge>}<button onClick={openReddit} disabled={!t.url} style={{ background: "transparent", color: t.url ? C.accent : C.muted, border: `1px solid ${t.url ? C.accent : C.border}`, borderRadius: 8, padding: "6px 14px", cursor: t.url ? "pointer" : "not-allowed", fontSize: 12, opacity: t.url ? 1 : 0.6 }}> View on Reddit</button></div>
       </div>
@@ -1088,7 +1126,7 @@ export function Dashboard({ user, onLogout }: { user: any; onLogout: () => void 
     </div>);
   };
 
-  const renderSaved = () => (<div><h2 style={{ margin: "0 0 20px", fontSize: 22, color: C.text, fontWeight: 700 }}>Saved ({bm.length})</h2>{bm.length === 0 ? <div style={{ textAlign: "center", padding: 60, color: C.muted }}>No saved items</div> : bm.map(b => <div key={b.id || b.title} style={{ background: C.card, borderRadius: 10, padding: "14px 18px", marginBottom: 8, border: `1px solid ${C.border}` }}><div style={{ fontSize: 14, color: C.text, fontWeight: 600, marginBottom: 4 }}>{b.title}</div><div style={{ fontSize: 12, color: C.muted }}>{b.sub} | {b.time}</div></div>)}</div>);
+  const renderSaved = () => (<div><h2 style={{ margin: "0 0 20px", fontSize: 22, color: C.text, fontWeight: 700 }}>Saved ({bm.length})</h2>{bm.length === 0 ? <div style={{ textAlign: "center", padding: 60, color: C.muted }}>No saved items</div> : bm.map(b => <div key={b.id || b.title} style={{ background: C.card, borderRadius: 10, padding: "14px 18px", marginBottom: 8, border: `1px solid ${C.border}` }}><div style={{ fontSize: 14, color: C.text, fontWeight: 600, marginBottom: 4 }}>{b.title}</div><div style={{ fontSize: 12, color: C.muted }}>{[b.sub, threadAge(b)].filter(Boolean).join(" | ")}</div></div>)}</div>);
 
   const renderSettings = () => {
     if (selIntel) {

@@ -3,6 +3,8 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { existsSync } from "fs";
 import pg from "pg";
+import { parseUtcSeconds, formatTimeAgo } from "./src/time.js";
+import { buildInfoUrl, extractCreatedTimes } from "./src/reddit-info.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -200,19 +202,6 @@ function formatRedditHttpError(status, payload) {
   return `HTTP ${status}`;
 }
 
-function parseUtc(value) {
-  if (typeof value === "number") {
-    return value > 1000000000000 ? Math.floor(value / 1000) : Math.floor(value);
-  }
-  if (typeof value === "string" && value.trim()) {
-    const asNumber = Number(value);
-    if (Number.isFinite(asNumber)) return parseUtc(asNumber);
-    const parsed = Date.parse(value);
-    if (!Number.isNaN(parsed)) return Math.floor(parsed / 1000);
-  }
-  return Math.floor(Date.now() / 1000);
-}
-
 function normalizeSubredditName(raw) {
   const text = String(raw || "").trim();
   if (!text) return "";
@@ -304,7 +293,7 @@ function parseRedditFeedPosts(feedText, subName) {
     const permalink = extractXmlAttr(entry, "link", "href") || "";
     const postId = extractXmlTag(entry, "id").replace(/^t3_/, "") || permalink.split("/comments/")[1]?.split("/")[0] || "";
     const published = extractXmlTag(entry, "published") || extractXmlTag(entry, "updated");
-    const createdUtc = published ? Math.floor(new Date(published).getTime() / 1000) : Math.floor(Date.now() / 1000);
+    const createdUtc = parseUtcSeconds(published);
     const author = decodeHtmlEntities(extractXmlTag(entry, "name")).replace(/^\/u\//i, "") || "unknown";
 
     return {
@@ -375,7 +364,7 @@ function normalizeApifyPost(item, fallbackSub = "") {
     title,
     selftext: String(item?.selfText || item?.selftext || item?.body || item?.text || item?.content || "").trim(),
     permalink: extractPermalink(item) || `/comments/${id}`,
-    created_utc: parseUtc(item?.createdAt ?? item?.created_utc ?? item?.created ?? item?.timestamp),
+    created_utc: parseUtcSeconds(item?.createdAt ?? item?.created_utc ?? item?.created ?? item?.timestamp),
     author: author || "unknown",
     subreddit: subreddit || normalizeSubredditName(fallbackSub),
     score: Number.isFinite(Number(scoreRaw)) ? Number(scoreRaw) : null,
@@ -535,7 +524,7 @@ async function fetchSubredditPublicApi(subName) {
           title: p.title,
           selftext: p.selftext || "",
           permalink: p.permalink || `/comments/${p.id}`,
-          created_utc: p.created_utc || Math.floor(Date.now() / 1000),
+          created_utc: parseUtcSeconds(p.created_utc),
           author: p.author || "unknown",
           subreddit: p.subreddit || name,
           score: p.score ?? null,
@@ -705,21 +694,33 @@ function extractThreadListingReply(data) {
 
 async function fetchPostSnapshot(postId, token) {
   const cached = apifyPostCache.get(postId);
+  let post = cached || null;
   let replyTo = cached?._topComment || null;
+  // Reddit's own listing is the authority on when a post was created. Scrapers
+  // sometimes omit the date entirely, so fall back to it rather than leave the
+  // age unknown.
+  const needsCreatedUtc = parseUtcSeconds(post?.created_utc) === null;
 
   // Lazy top-comment fetch via Reddit's per-post JSON endpoint. This is needed
   // because the bulk subreddit scrape now runs with includeComments: false to
   // keep the actor fast, so cached posts have _topComment === null. Best
   // effort — silently ignore failures (replyTo simply stays null).
-  if (!replyTo) {
+  if (!replyTo || needsCreatedUtc) {
     try {
       const url = `https://www.reddit.com/comments/${postId}.json?limit=1`;
       const res = await fetchWithTimeout(url, { headers: { "User-Agent": "SocialScanner/1.0" } }, 8000);
       if (res.ok) {
         const data = await readJsonOrText(res);
         if (Array.isArray(data)) {
-          replyTo = extractThreadListingReply(data);
-          if (cached && replyTo) cached._topComment = replyTo;
+          if (!replyTo) {
+            replyTo = extractThreadListingReply(data);
+            if (cached && replyTo) cached._topComment = replyTo;
+          }
+          const liveUtc = parseUtcSeconds(extractThreadListingPost(data)?.created_utc);
+          if (needsCreatedUtc && liveUtc !== null) {
+            post = { ...(post || {}), created_utc: liveUtc };
+            if (cached) cached.created_utc = liveUtc;
+          }
         }
       }
     } catch {
@@ -728,16 +729,21 @@ async function fetchPostSnapshot(postId, token) {
   }
 
   return {
-    post: cached || null,
+    post,
     replyTo,
   };
 }
 
-function timeAgo(utc) {
-  const diff = Date.now() / 1000 - utc;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
+// Look up creation times for posts we already hold but have no timestamp for.
+// Reddit accepts up to 100 fullnames (t3_<id>) per /api/info call.
+async function fetchPostCreatedTimes(postIds = []) {
+  const url = buildInfoUrl(postIds);
+  if (!url) return {};
+
+  const res = await fetchWithTimeout(url, { headers: { "User-Agent": "SocialScanner/1.0" } }, 10000);
+  if (!res.ok) throw new Error(`Reddit info lookup failed: HTTP ${res.status}`);
+
+  return extractCreatedTimes(await readJsonOrText(res));
 }
 
 // ── POST /api/reddit ─────────────────────────────────────────
@@ -831,7 +837,10 @@ app.post("/api/reddit", async (req, res) => {
         subMembers,
         score: Number.isFinite(hydratedPost.score) ? hydratedPost.score : null,
         comments: Number.isFinite(hydratedPost.num_comments) ? hydratedPost.num_comments : null,
-        time: timeAgo(hydratedPost.created_utc),
+        // createdUtc is the absolute truth the UI renders from; `time` is kept
+        // only so an older cached bundle still shows something.
+        createdUtc: parseUtcSeconds(hydratedPost.created_utc),
+        time: formatTimeAgo(hydratedPost.created_utc),
         intent: (() => {
           const buyingSignals = ["looking for", "recommendation", "which app", "what do you use", "switching from", "alternative to", "need a", "any app", "suggest"];
           const competitors = ["ynab", "mint", "walnut", "fi money", "jupiter", "goodbudget"];
@@ -861,6 +870,23 @@ app.post("/api/reddit", async (req, res) => {
   } catch (err) {
     console.error("Reddit API error:", err);
     res.status(500).json({ error: "Failed to fetch Reddit threads" });
+  }
+});
+
+// ── POST /api/post-times ─────────────────────────────────────
+// Backfill for leads saved before createdUtc existed. Those carry only the
+// relative string the server rendered on scan day, which is now wrong by
+// however long ago that scan was.
+app.post("/api/post-times", async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    if (!ids.length) return res.json({ times: {} });
+    const times = await fetchPostCreatedTimes(ids);
+    console.log(`[reddit] backfilled created times for ${Object.keys(times).length}/${ids.length} posts`);
+    res.json({ times });
+  } catch (err) {
+    console.warn("post-times lookup failed:", err.message);
+    res.status(502).json({ error: "Failed to look up post times", times: {} });
   }
 });
 
